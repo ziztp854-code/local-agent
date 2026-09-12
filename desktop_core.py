@@ -171,7 +171,7 @@ def describe_workspace(root, max_files=4000):
             names[:] = []
     ranked = sorted(ext_counts.items(), key=lambda item: (-item[1], item[0]))
     top = [
-        (LANGUAGE_LABELS.get(suffix, f".{suffix}"), count)
+        (LANGUAGE_LABELS.get(suffix, f".{suffix}" if suffix else "بدون امتداد"), count)
         for suffix, count in ranked[:3]
         if count
     ]

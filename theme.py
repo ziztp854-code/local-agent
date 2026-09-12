@@ -39,9 +39,10 @@ def ui_font(size=10, weight="normal"):
 
 
 def display_font(size=22, weight="bold"):
+    # عناوين بأسلوب الطرفية: monospace يعطي طابع TUI حتى في النوافذ.
     if weight == "normal":
-        return (DISPLAY_FONT_FAMILY, size)
-    return (DISPLAY_FONT_FAMILY, size, weight)
+        return (MONO_FONT_FAMILY, size)
+    return (MONO_FONT_FAMILY, size, weight)
 
 
 def mono_font(size=10, weight="normal"):
@@ -61,7 +62,8 @@ SPACE = {
 }
 
 # نصف قطر الزوايا الموحّد للبطاقات والأزرار.
-RADIUS = {"sm": 6, "md": 10, "lg": 14}
+# حواف شبه حادة بأسلوب الطرفية (terminal)؛ التفاصيل الأربعة تظل لطيفة في الفاتح.
+RADIUS = {"sm": 3, "md": 5, "lg": 6}
 
 
 def shade(hex_color, factor):
@@ -112,11 +114,11 @@ def space(*keys):
 
 
 def thought_font():
-    return (UI_FONT_FAMILY, 9, "italic")
+    return (MONO_FONT_FAMILY, 9, "italic")
 
 
 def tool_line_font():
-    return (UI_FONT_FAMILY, 8, "italic")
+    return (MONO_FONT_FAMILY, 8, "italic")
 
 
 def menu_font():
@@ -149,28 +151,29 @@ COLORS = {
     "secondary_bg": "#E6EEEB",
 }
 
-# هوية «أخضر زمردي على قماش داكن» احترافية بطابع تقني هادئ.
-# سلّم عمق: fog (رئيسية) < secondary_bg < surface (بطاقات) < chip/elevated.
+# هوية «طرفية OpenCode»: أسود محايد رمادي (ليس مخضرًّا) مع لمسة برتقالية واحدة،
+# حواف شبه حادة وطبقة mono للتفاصيل — إحساس TUI داخل نافذة سطح مكتب.
+# سلّم عمق محايد: fog (رئيسية) < secondary_bg < surface (بطاقات) < chip/elevated.
 DARK_COLORS = {
-    "ink": "#F3F7F5",       # نص رئيسي
-    "fog": "#07110F",       # خلفية رئيسية
-    "surface": "#10201C",   # خلفية البطاقات
-    "muted": "#9AB0A9",     # نص ثانوي
-    "teal": "#00D99A",      # اللون الأساسي
-    "copper": "#F5B942",    # تحذير/إبراز ثانوي
-    "danger": "#FF647C",    # خطأ
-    "line": "#223A33",      # حدود خفيفة
-    "soft_teal": "#0C2A22",  # خلفية أساسية ناعمة (فقاعة المستخدم/النشط)
-    "soft_copper": "#2C2612",
-    "soft_danger": "#2E1820",
-    "focus": "#19E6AC",     # الأساسي عند التحويم/حلقة التركيز
-    "band_bg": "#0B1714",   # خلفية ثانوية (شريط الحالة)
-    "band_fg": "#F3F7F5",
-    "chip": "#142823",      # خلفية مرتفعة (الرقائق)
-    "chip_fg": "#D7E6E0",
-    "success": "#25C990",
-    "warning": "#F5B942",
-    "info": "#55A7FF",
-    "elevated": "#142823",
-    "secondary_bg": "#0B1714",
+    "ink": "#EDEDEE",       # نص رئيسي فاتح محايد
+    "fog": "#0A0A0A",       # خلفية رئيسية شبه سوداء
+    "surface": "#141414",   # خلفية البطاقات
+    "muted": "#8A8A8A",     # نص ثانوي رمادي
+    "teal": "#FF8F40",      # اللون الأساسي (برتقالي OpenCode)
+    "copper": "#FFC878",    # تحذير/إبراز ثانوي
+    "danger": "#FF6B6B",    # خطأ
+    "line": "#262626",      # حدود خفيفة محايدة
+    "soft_teal": "#1D1611",  # خلفية أساسية ناعمة (فقاعة المستخدم/النشط) بدفء برتقالي
+    "soft_copper": "#211B10",
+    "soft_danger": "#2A1418",
+    "focus": "#FFA35C",     # الأساسي عند التحويم/حلقة التركيز
+    "band_bg": "#0F0F0F",   # خلفية ثانوية (شريط الحالة)
+    "band_fg": "#EDEDEE",
+    "chip": "#1B1B1B",      # خلفية مرتفعة (الرقائق)
+    "chip_fg": "#D4D4D4",
+    "success": "#4AD98F",
+    "warning": "#FFC878",
+    "info": "#6FA8FF",
+    "elevated": "#1B1B1B",
+    "secondary_bg": "#0F0F0F",
 }

@@ -625,7 +625,7 @@ class LocalAgentApp:
                 cursor="hand2",
             )
             button.pack()
-            # مؤشّر خط سفلي زمردي يظهر تحت التبويب النشط فقط.
+            # مؤشّر خط سفلي بلون الأساسي يظهر تحت التبويب النشط فقط.
             underline = tk.Frame(cell, height=2, bg=COLORS["surface"])
             underline.pack(fill="x", pady=(3, 0))
             self._tab_buttons[str(page)] = button

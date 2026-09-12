@@ -85,6 +85,16 @@ class WorkspaceBriefingTests(unittest.TestCase):
         self.assertEqual(stats["files"], 2)
         self.assertTrue(stats["truncated"])
 
+    def test_describe_labels_extensionless_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "Dockerfile").write_text("x", encoding="utf-8")
+            (root / "LICENSE").write_text("x", encoding="utf-8")
+            (root / "main.py").write_text("x", encoding="utf-8")
+            stats = describe_workspace(root)
+        self.assertEqual(stats["top"][0], ("بدون امتداد", 2))
+        self.assertEqual(stats["top"][1], ("Python", 1))
+
     def test_briefing_text_is_actionable(self):
         empty = build_workspace_briefing({
             "files": 0, "directories": 0, "truncated": False, "top": [],
