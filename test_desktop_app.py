@@ -255,7 +255,7 @@ class DesktopConfigTests(unittest.TestCase):
 
             self.assertIs(result, built)
             registry_class.assert_called_once()
-            memory_class.assert_called_once_with(session.path.with_suffix(".memory.json"))
+            memory_class.assert_called_once_with(session.path.with_suffix(".memory.sqlite"))
             agent_class.assert_called_once_with(
                 client,
                 workspace,

@@ -1032,7 +1032,7 @@ def main(argv=None):
             session=session,
             mcp_registry=mcp_registry,
             memory=(
-                SemanticMemory(session.path.with_suffix(".memory.json"))
+                SemanticMemory(session.path.with_suffix(".memory.sqlite"))
                 if args.semantic_memory
                 else None
             ),

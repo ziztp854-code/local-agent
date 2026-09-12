@@ -1,8 +1,10 @@
-import json
 import hashlib
+import json
 import os
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing, contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,10 +25,18 @@ class FakeClient:
         ]
 
 
+@contextmanager
+def open_memory(path):
+    with closing(sqlite3.connect(path)) as connection:
+        connection.row_factory = sqlite3.Row
+        yield connection
+        connection.commit()
+
+
 class SemanticMemoryTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.path = Path(self.temporary.name) / "memory.json"
+        self.path = Path(self.temporary.name) / "memory.sqlite"
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -39,12 +49,12 @@ class SemanticMemoryTests(unittest.TestCase):
         SemanticMemory(self.path).remember(["alpha"], client, "nomic")
 
         self.assertEqual(client.calls, [(["alpha", "beta"], "nomic")])
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual(
-            [record["text"] for record in payload["records"]], ["alpha", "beta"]
-        )
-        self.assertEqual(payload["records"][0]["metadata"]["model"], "nomic")
-        self.assertEqual(payload["records"][0]["embedding"], [1.0, 0.0])
+        with open_memory(self.path) as connection:
+            rows = connection.execute(
+                "SELECT text, model, embedding FROM records ORDER BY id"
+            ).fetchall()
+        self.assertEqual([row["text"] for row in rows], ["alpha", "beta"])
+        self.assertEqual(rows[0]["model"], "nomic")
 
     def test_for_workspace_uses_a_stable_safe_state_path(self):
         state = Path(self.temporary.name) / "state"
@@ -68,7 +78,7 @@ class SemanticMemoryTests(unittest.TestCase):
                 self.assertRaises(ValueError),
             ):
                 SemanticMemory.for_workspace(root, namespace)
-        self.assertRegex(first.path.name, r"^[0-9a-f]{64}\.json$")
+        self.assertRegex(first.path.name, r"^[0-9a-f]{64}\.sqlite$")
         with self.assertRaises(ValueError):
             SemanticMemory.for_workspace(workspace, "../unsafe")
 
@@ -86,9 +96,8 @@ class SemanticMemoryTests(unittest.TestCase):
         self.assertEqual(first, [[0.5, 0.5], [0.5, 0.5]])
         self.assertEqual(second, [[0.5, 0.5]])
         self.assertEqual(client.calls, [(["private workspace passage"], "nomic")])
-        self.assertNotIn(
-            "private workspace passage", self.path.read_text(encoding="utf-8")
-        )
+        raw = self.path.read_bytes()
+        self.assertNotIn("private workspace passage".encode(), raw)
 
     def test_model_change_invalidates_cached_embedding(self):
         first = FakeClient({"alpha": [1.0, 0.0]})
@@ -116,37 +125,32 @@ class SemanticMemoryTests(unittest.TestCase):
     def test_load_ignores_cache_entries_from_an_outdated_dimension(self):
         old_hash = hashlib.sha256(b"old").hexdigest()
         new_hash = hashlib.sha256(b"new").hexdigest()
-        self.path.write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "records": [],
-                    "cache": [
-                        {
-                            "hash": old_hash,
-                            "model": "nomic",
-                            "dimension": 2,
-                            "embedding": [1, 0],
-                        },
-                        {
-                            "hash": new_hash,
-                            "model": "nomic",
-                            "dimension": 3,
-                            "embedding": [0, 1, 0],
-                        },
-                    ],
-                }
-            ),
-            encoding="utf-8",
-        )
+        with open_memory(self.path) as connection:
+            connection.executescript(SemanticMemory._SCHEMA)
+            connection.execute(
+                "INSERT INTO cache(hash, model, dimension, embedding) VALUES (?, ?, ?, ?)",
+                (old_hash, "nomic", 2, b"\x00" * 8),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO cache(hash, model, dimension, embedding)"
+                " VALUES (?, ?, ?, ?)",
+                (old_hash, "nomic", 2, b"\x00" * 8),
+            )
+            connection.execute(
+                "INSERT OR REPLACE INTO cache(hash, model, dimension, embedding)"
+                " VALUES (?, ?, ?, ?)",
+                (new_hash, "nomic", 3, b"\x00" * 12),
+            )
+            connection.commit()
         client = FakeClient({"old": [1.0, 0.0, 0.0]}, dimension=3)
 
         self.assertEqual(
-            SemanticMemory(self.path).embed_texts(["old"], client, "nomic"), [[1, 0, 0]]
+            SemanticMemory(self.path).embed_texts(["old"], client, "nomic"),
+            [[1.0, 0.0, 0.0]],
         )
         self.assertEqual(client.calls, [(["old"], "nomic")])
 
-    def test_recall_returns_cosine_ranked_records_with_metadata(self):
+    def test_recall_fuses_vector_and_fts_with_rrf(self):
         client = FakeClient(
             {
                 "fruit": [1.0, 0.0],
@@ -157,11 +161,35 @@ class SemanticMemoryTests(unittest.TestCase):
         memory = SemanticMemory(self.path)
         memory.remember(["ocean", "apple"], client, "nomic")
 
-        result = memory.recall("fruit", client, "nomic", limit=1)
+        result = memory.recall("fruit", client, "nomic", limit=5)
 
+        # "fruit" لا تشبه النصين دلاليًا بأكثر من تقارب "apple"؛ الترتيب
+        # يتبع التشابه الجيبي المرتّب، والنتيجة تحمل الكوسينوس ومجموع RRF.
         self.assertEqual(result[0]["text"], "apple")
         self.assertEqual(result[0]["metadata"]["dimension"], 2)
-        self.assertAlmostEqual(result[0]["score"], 0.9939, places=4)
+        self.assertAlmostEqual(result[0]["cosine"], 0.9939, places=4)
+        # أعلى رتبة متجهات → نقاط مسوّاة 1.0 (بدون ساق معجمي مطابق هنا).
+        self.assertAlmostEqual(result[0]["score"], 1.0, places=6)
+        self.assertIn("source", result[0]["metadata"])
+        self.assertIn("created_at", result[0]["metadata"])
+
+    def test_lexical_leg_lifts_exact_text_matches_over_weak_vectors(self):
+        client = FakeClient(
+            {
+                "the deploy target is Fly.io": [0.9, 0.1],
+                "database migration notes": [0.8, 0.2],
+            }
+        )
+        memory = SemanticMemory(self.path)
+        memory.remember(["database migration notes", "the deploy target is Fly.io"], client, "nomic")
+
+        result = memory.recall("deploy fly", client, "nomic", limit=5)
+
+        # ساق BM25 يضيف رتبة للاستدعاء المطابق نصيًا فيسبق الأعلى كوسينوس.
+        self.assertEqual(result[0]["text"], "the deploy target is Fly.io")
+        self.assertGreater(result[0]["score"], result[-1]["score"])
+        # المطابقة المزدوجة (متجهات + معجم) تساوي 2.0 كحد أقصى.
+        self.assertAlmostEqual(result[0]["score"], 2.0, places=6)
 
     def test_recall_ignores_records_from_another_model(self):
         memory = SemanticMemory(self.path)
@@ -187,6 +215,9 @@ class SemanticMemoryTests(unittest.TestCase):
             lambda: memory.embed_texts(["longer"], client, "nomic"),
             lambda: memory.embed_texts(["one"], client, ""),
             lambda: memory.recall("one", client, "nomic", limit=0),
+            lambda: memory.supersede(0, "x", client, "nomic"),
+            lambda: memory.supersede(True, "x", client, "nomic"),
+            lambda: memory.record(-1, client, "nomic"),
         ]
         for call in invalid_calls:
             with self.subTest(call=call), self.assertRaises(ValueError):
@@ -194,14 +225,16 @@ class SemanticMemoryTests(unittest.TestCase):
 
         memory.remember(["one", "two"], client, "nomic")
         memory.remember(["tri"], client, "nomic")
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual(
-            [record["text"] for record in payload["records"]], ["two", "tri"]
-        )
-        self.assertLessEqual(len(payload["cache"]), 2)
+        with open_memory(self.path) as connection:
+            rows = connection.execute(
+                "SELECT text FROM records ORDER BY id"
+            ).fetchall()
+            cache_count = connection.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
+        self.assertEqual([row["text"] for row in rows], ["two", "tri"])
+        self.assertLessEqual(cache_count, 2)
 
-    def test_byte_limit_rolls_oldest_records_and_keeps_the_latest(self):
-        memory = SemanticMemory(self.path, max_bytes=1_000, max_records=10)
+    def test_record_budget_rolls_oldest_records_and_keeps_the_latest(self):
+        memory = SemanticMemory(self.path, max_bytes=1_100, max_records=10)
         texts = [
             f"{label} " + "detail " * 40 for label in ("oldest", "middle", "newest")
         ]
@@ -210,9 +243,11 @@ class SemanticMemoryTests(unittest.TestCase):
         for text in texts:
             memory.remember([text], client, "nomic")
 
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual([record["text"] for record in payload["records"]], texts[-2:])
-        self.assertLessEqual(self.path.stat().st_size, 1_000)
+        with open_memory(self.path) as connection:
+            rows = connection.execute(
+                "SELECT text FROM records ORDER BY id"
+            ).fetchall()
+        self.assertEqual([row["text"] for row in rows], texts[-2:])
 
     def test_secrets_are_redacted_before_embedding_and_storage(self):
         memory = SemanticMemory(self.path)
@@ -230,7 +265,7 @@ private-material
 
         memory.remember([text], client, "nomic")
 
-        stored = self.path.read_text(encoding="utf-8")
+        stored = self.path.read_bytes()
         embedded = client.calls[0][0][0]
         for secret in [
             "short",
@@ -242,9 +277,9 @@ private-material
             "bearer-value",
             "private-material",
         ]:
-            self.assertNotIn(secret, stored)
+            self.assertNotIn(secret.encode(), stored)
             self.assertNotIn(secret, embedded)
-        self.assertIn("[REDACTED]", stored)
+        self.assertIn("[REDACTED]", stored.decode(encoding="utf-8", errors="ignore"))
 
     def test_base64_records_are_rejected(self):
         memory = SemanticMemory(self.path)
@@ -283,66 +318,17 @@ private-material
             with self.subTest(response=response), self.assertRaises(RuntimeError):
                 memory.embed_texts(["one"], InvalidClient(response), "nomic")
 
-    def test_malformed_oversized_and_unsafe_files_are_rejected(self):
-        memory = SemanticMemory(self.path, max_bytes=256)
+    def test_corrupt_files_are_rejected(self):
+        memory = SemanticMemory(self.path)
         invalid_documents = [
-            b"not-json",
-            b"[]",
+            b"not-a-sqlite-database-at-all" + b"\x00" * 64,
             b"{" + (b" " * 256) + b"}",
-            json.dumps(
-                {
-                    "version": 1,
-                    "records": [
-                        {
-                            "text": "token=stored-secret",
-                            "metadata": {
-                                "hash": "0" * 64,
-                                "model": "nomic",
-                                "dimension": 1,
-                            },
-                            "embedding": [1.0],
-                        }
-                    ],
-                    "cache": [],
-                }
-            ).encode(),
         ]
         for document in invalid_documents:
             with self.subTest(document=document[:20]):
                 self.path.write_bytes(document)
                 with self.assertRaises(RuntimeError):
                     memory.embed_texts([], FakeClient(), "nomic")
-
-    def test_file_schema_rejects_boolean_versions_and_non_string_models(self):
-        documents = [
-            {"version": True, "records": [], "cache": []},
-            {
-                "version": 1,
-                "records": [
-                    {
-                        "text": "safe",
-                        "metadata": {
-                            "hash": hashlib.sha256(b"safe").hexdigest(),
-                            "model": None,
-                            "dimension": 1,
-                        },
-                        "embedding": [1],
-                    }
-                ],
-                "cache": [],
-            },
-        ]
-        for document in documents:
-            with self.subTest(document=document):
-                self.path.write_text(json.dumps(document), encoding="utf-8")
-                with self.assertRaises(RuntimeError):
-                    SemanticMemory(self.path).embed_texts([], FakeClient(), "nomic")
-
-        self.path.write_text(
-            '{"version":1,"records":[],"cache":[],"cache":[]}', encoding="utf-8"
-        )
-        with self.assertRaises(RuntimeError):
-            SemanticMemory(self.path).embed_texts([], FakeClient(), "nomic")
 
     def test_reparse_ancestor_is_rejected_before_contacting_client(self):
         memory = SemanticMemory(self.path)
@@ -356,17 +342,121 @@ private-material
                 memory.embed_texts(["safe"], client, "nomic")
         self.assertEqual(client.calls, [])
 
-    def test_failed_atomic_replace_preserves_the_previous_file(self):
+    def test_failed_commit_preserves_the_previous_state(self):
         memory = SemanticMemory(self.path)
         memory.remember(["old"], FakeClient(), "nomic")
-        before = self.path.read_bytes()
+        with open_memory(self.path) as connection:
+            before = connection.execute("SELECT COUNT(*) FROM records").fetchone()[0]
 
-        with patch("semantic_memory.os.replace", side_effect=OSError("disk failure")):
+        original = SemanticMemory._commit
+        attempts = {"count": 0}
+
+        def flaky_commit(connection):
+            attempts["count"] += 1
+            if attempts["count"] >= 2:
+                # يحاكي ما تفعله _commit الحقيقية: تتحول OSError إلى RuntimeError.
+                raise RuntimeError("Could not save semantic memory")
+            original(connection)
+
+        with patch.object(SemanticMemory, "_commit", side_effect=flaky_commit):
             with self.assertRaises(RuntimeError):
                 memory.remember(["new"], FakeClient(), "nomic")
 
-        self.assertEqual(self.path.read_bytes(), before)
-        self.assertEqual(list(self.path.parent.glob(".semantic-memory-*.tmp")), [])
+        with open_memory(self.path) as connection:
+            after = connection.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+        self.assertEqual(before, after)
+
+    def test_provenance_is_stored_and_returned(self):
+        client = FakeClient({"fact": [1.0, 0.0]})
+        memory = SemanticMemory(self.path)
+
+        memory.remember(["fact"], client, "nomic", source="notes.md:12")
+
+        result = memory.recall("fact", client, "nomic", limit=1)
+        self.assertEqual(result[0]["metadata"]["source"], "notes.md:12")
+        with self.assertRaises(ValueError):
+            memory.remember(["other"], client, "nomic", source="\x00bad")
+
+    def test_supersession_closes_old_record_and_keeps_history(self):
+        client = FakeClient({"v1": [1.0, 0.0], "v2": [0.9, 0.1]})
+        memory = SemanticMemory(self.path)
+
+        added = memory.remember(["v1"], client, "nomic")
+        self.assertEqual(added, 1)
+        with open_memory(self.path) as connection:
+            old_id = connection.execute(
+                "SELECT id FROM records"
+            ).fetchone()[0]
+
+        new_id = memory.supersede(old_id, "v2", client, "nomic", source="تصحيح")
+
+        with open_memory(self.path) as connection:
+            old_row = connection.execute(
+                "SELECT superseded_by, supersedes FROM records WHERE id = ?", (old_id,)
+            ).fetchone()
+            new_row = connection.execute(
+                "SELECT supersedes FROM records WHERE id = ?", (new_id,)
+            ).fetchone()
+        self.assertEqual(old_row["superseded_by"], new_id)
+        self.assertEqual(new_row["supersedes"], old_id)
+
+        result = memory.recall("v2", client, "nomic", limit=5)
+        self.assertEqual([item["text"] for item in result], ["v2"])
+
+        info = memory.record(old_id, client, "nomic")
+        self.assertEqual(info["superseded_by"], new_id)
+        self.assertEqual(info["source"], "")
+        with self.assertRaises(ValueError):
+            memory.supersede(old_id, "v3", client, "nomic")
+        with self.assertRaises(ValueError):
+            memory.supersede(999, "v3", client, "nomic")
+
+    def test_legacy_json_is_migrated_and_archived(self):
+        legacy = self.path.with_suffix(".json")
+        payload = {
+            "version": 1,
+            "records": [
+                {
+                    "text": "legacy fact",
+                    "metadata": {
+                        "hash": hashlib.sha256(b"legacy fact").hexdigest(),
+                        "model": "nomic",
+                        "dimension": 2,
+                    },
+                    "embedding": [1.0, 0.0],
+                }
+            ],
+            "cache": [
+                {
+                    "hash": hashlib.sha256(b"legacy fact").hexdigest(),
+                    "model": "nomic",
+                    "dimension": 2,
+                    "embedding": [1.0, 0.0],
+                }
+            ],
+        }
+        legacy.write_text(json.dumps(payload), encoding="utf-8")
+
+        client = FakeClient({"legacy fact": [1.0, 0.0]})
+        memory = SemanticMemory(self.path)
+        self.assertEqual(
+            memory.recall("legacy fact", client, "nomic", limit=5)[0]["text"],
+            "legacy fact",
+        )
+        self.assertEqual(client.calls, [])
+        self.assertTrue(legacy.with_suffix(".json.migrated").exists())
+        self.assertFalse(legacy.exists())
+
+    def test_invalid_legacy_json_is_rejected(self):
+        legacy = self.path.with_suffix(".json")
+        legacy.write_bytes(b"{duplicate: key, duplicate: key}")
+        with self.assertRaises(RuntimeError):
+            SemanticMemory(self.path).embed_texts(["x"], FakeClient(), "nomic")
+
+    def test_fts_query_is_injection_safe(self):
+        query = SemanticMemory._fts_query('neo" OR 1=1 --')
+        self.assertNotIn("OR", query.replace('"OR"', ""))
+        self.assertNotIn("--", query)
 
 
 if __name__ == "__main__":

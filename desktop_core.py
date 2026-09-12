@@ -744,7 +744,7 @@ def build_local_agent(config, approver):
         else None
     )
     memory = (
-        SemanticMemory(session.path.with_suffix(".memory.json"))
+        SemanticMemory(session.path.with_suffix(".memory.sqlite"))
         if config.semantic_memory
         else None
     )
