@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "browser": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@0.0.80", "--isolated"],
+      "env": {},
+      "disabled": false
+    },
+    "local_service": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp",
+      "disabled": true
+    },
+    "legacy_local_service": {
+      "type": "sse",
+      "url": "http://127.0.0.1:8000/sse",
+      "disabled": true
+    }
+  }
+}

@@ -1,0 +1,10 @@
+.local-agent/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.unlazy/
+.coverage
+build/
+dist/
+*.log
+*.spec
