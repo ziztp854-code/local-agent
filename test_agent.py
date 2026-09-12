@@ -334,10 +334,11 @@ class LocalAgentTests(unittest.TestCase):
 
         workspace = RecordingWorkspace()
         agent = LocalAgent(TooManyToolsClient(), workspace, max_steps=1, max_tool_calls=3)
-        # بدل خطأ صلب عند استنفاد الجولات: يُنتج خلاصة نهائية، والأدوات نُفّذت 3 مرات.
+        # بدل خطأ صلب عند استنفاد الجولات: يُنتج خلاصة نهائية. الأدوات نُفّذت
+        # مرتين فقط؛ الثالثة المكررة حُجبت بحاجز التكرار الناجح بتوجيه بلا تنفيذ.
         answer = agent.answer("اقرأ")
         self.assertIn("الحد الأقصى للخطوات", answer)
-        self.assertEqual(workspace.calls, 3)
+        self.assertEqual(workspace.calls, 2)
 
         class HistoryClient:
             def __init__(self):
@@ -443,6 +444,81 @@ class LocalAgentTests(unittest.TestCase):
         self.assertLessEqual(len(client.tool_results[0].encode("utf-8")), 8_000)
         self.assertIn("truncated", client.tool_results[0])
         self.assertEqual(client.tool_results[1], "b" * 20)
+
+    def test_identical_successful_calls_get_redirected_and_text_tool_calls_retried(self):
+        class RedirectedWorkspace:
+            coding = False
+
+            @staticmethod
+            def tool_schemas():
+                return [{
+                    "type": "function",
+                    "function": {
+                        "name": "list_files",
+                        "description": "read",
+                        "parameters": {"type": "object"},
+                    },
+                }]
+
+            @staticmethod
+            def dispatch(name, arguments, _client, _model):
+                return "same"
+
+        class RepeatClient:
+            def __init__(self):
+                self.calls = 0
+                self.tool_results = []
+
+            def chat(self, messages, tools, model):
+                self.calls += 1
+                if self.calls <= 3:
+                    return {"choices": [{"message": {
+                        "role": "assistant",
+                        "tool_calls": [{"id": f"call-{self.calls}", "function": {
+                            "name": "list_files", "arguments": '{"path":"."}'
+                        }}],
+                    }}]}
+                self.tool_results = [
+                    message["content"] for message in messages if message.get("role") == "tool"
+                ]
+                return {"choices": [{"message": {"role": "assistant", "content": "انتهى"}}]}
+
+        client = RepeatClient()
+        answer = LocalAgent(client, RedirectedWorkspace(), max_tool_calls=6).answer("كرر")
+        self.assertEqual(answer, "انتهى")
+        # الاستدعاءان الأول والثاني نُفّذا فعليًا؛ الثالث حُجب بتوجيه بلا تنفيذ.
+        self.assertEqual(
+            sum(1 for result in client.tool_results if result == "same"),
+            2,
+        )
+        self.assertTrue(
+            any(result.startswith("توجيه:") for result in client.tool_results)
+        )
+
+        class TextCallClient:
+            def __init__(self):
+                self.calls = 0
+                self.last_messages = []
+
+            def chat(self, messages, tools, model):
+                self.calls += 1
+                if self.calls == 1:
+                    return {"choices": [{"message": {
+                        "role": "assistant",
+                        "content": '<tool_call>\n{"name": "list_files", "arguments": {"path": "."}}\n</tool_call>',
+                    }}]}
+                self.last_messages = messages
+                return {"choices": [{"message": {"role": "assistant", "content": "تم التحقق"}}]}
+
+        client = TextCallClient()
+        answer = LocalAgent(client, RedirectedWorkspace()).answer("استدعِ")
+        self.assertEqual(answer, "تم التحقق")
+        nudges = [
+            message["content"]
+            for message in client.last_messages
+            if message["role"] == "system" and "آلية tool_calls" in message["content"]
+        ]
+        self.assertEqual(len(nudges), 1)
 
     def test_agent_loads_and_saves_the_optional_session(self):
         class AnswerClient:

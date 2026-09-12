@@ -612,7 +612,10 @@ class LocalAgent:
         tool_call_count = 0
         tool_result_bytes = 0
         failed_signatures = set()
+        done_signatures = set()
+        success_counts = {}
         empty_retries = 0
+        text_call_retries = 0
 
         for _ in range(self.max_steps):
             tool_schemas = (
@@ -645,13 +648,40 @@ class LocalAgent:
                 message, answer, response_events = self._message_from_response(
                     self.client.chat(messages, tool_schemas, self.model)
                 )
-                yield from response_events
+                # إن كان الرد استدعاء أدوات مكتوبًا نصيًا سيُعيد توجيهه، فلا بُثّ
+                # محتواه إطلاقًا حتى لا يتسرب JSON خام إلى الإجابة النهائية.
+                text_retry_needed = (
+                    not message.get("tool_calls")
+                    and isinstance(answer, str)
+                    and "<tool_call>" in answer
+                    and text_call_retries < 1
+                )
+                if not text_retry_needed:
+                    yield from response_events
             messages = [*messages, message]
             tool_calls = message.get("tool_calls", [])
             if not isinstance(tool_calls, list):
                 raise RuntimeError("LM Studio returned invalid tool calls")
             if not tool_calls:
                 answer = message.get("content") if not isinstance(answer, str) else answer
+                if isinstance(answer, str) and "<tool_call>" in answer and text_call_retries < 1:
+                    # النموذج كتب استدعاء الأداة كنص داخل المحتوى بدل آلية
+                    # tool_calls؛ لو قُبل كجواب نهائي لظهر JSON خام للمستخدم.
+                    # نعيد التوجيه مرة واحدة لينتج استدعاءً حقيقيًا أو إجابة.
+                    text_call_retries += 1
+                    messages = [
+                        *messages,
+                        {
+                            "role": "system",
+                            "content": (
+                                "كتبت استدعاء الأداة كنص داخل ردك. الاستدعاء النصي "
+                                "لا يُنفَّذ. أعد إنتاجه عبر آلية tool_calls الخاصة "
+                                "بالخادم، أو إن كنت قد انتهيت فاكتب إجابة نهائية "
+                                "بالعربية دون وسم أدوات."
+                            ),
+                        },
+                    ]
+                    continue
                 if not isinstance(answer, str) or not answer.strip():
                     # النموذج أنتج تفكيرًا فقط بلا إجابة نهائية. (2) أعد المحاولة
                     # مرة واحدة مع تنبيه صريح، ثم (1) اعرض رسالة ودّية بدل خطأ صلب.
@@ -697,6 +727,24 @@ class LocalAgent:
                 if not isinstance(raw_arguments, str):
                     raise RuntimeError("LM Studio returned invalid tool arguments")
                 signature = _call_signature(name, raw_arguments)
+                if signature in done_signatures:
+                    content = (
+                        "توجيه: نفّذت هذا الاستدعاء نفسه بنجاح مرتين وستكون النتيجة "
+                        "متطابقة تمامًا. لا تُعده؛ استعمل النتيجة السابقة وانتقل "
+                        "للخطوة التالية أو اكتب إجابتك النهائية."
+                    )
+                    yield {"type": "tool_end", "name": name, "status": "ok"}
+                    encoded = content.encode("utf-8")
+                    remaining = self.max_tool_result_bytes - tool_result_bytes
+                    if len(encoded) > remaining:
+                        content = encoded[: max(0, remaining)].decode("utf-8", errors="replace")
+                        encoded = content.encode("utf-8")
+                    tool_result_bytes += len(encoded)
+                    messages = [
+                        *messages,
+                        {"role": "tool", "tool_call_id": call_id, "content": content},
+                    ]
+                    continue
                 if signature in failed_signatures:
                     content = (
                         "خطأ: كرّرت استدعاء الأداة نفسه بالوسائط نفسها بعد فشله. "
@@ -768,6 +816,13 @@ class LocalAgent:
                 status = "error" if content.startswith("خطأ:") else "ok"
                 if status == "error":
                     failed_signatures.add(signature)
+                else:
+                    # حاجز التكرار الناجح: الاستدعاء نفسه بنتيجة متطابقة يستهلك
+                    # الجولات بلا معلومة جديدة؛ بعد نجاحين نحوّل تكراره الثالث
+                    # إلى توجيه يجبر النموذج على الانتقال للخطوة التالية.
+                    success_counts[signature] = success_counts.get(signature, 0) + 1
+                    if success_counts[signature] >= 2:
+                        done_signatures.add(signature)
                 yield {"type": "tool_end", "name": name, "status": status}
                 # سقف لكل نتيجة أداة يمنع نتيجة واحدة ضخمة من استهلاك كامل
                 # ميزانية النتائج وترك ما بعدها فارغًا فيهلوس النموذج بدل أن يرى.
