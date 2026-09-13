@@ -118,7 +118,7 @@ class SelfLearnerTests(unittest.TestCase):
             self.assertEqual(first, "المشروع مكتوب بلغة بايثون")
             # الدرس حُفظ.
             self.assertTrue(memory.recall("مشروع بايثون", client, "embed", 5))
-            # الطلب الثاني يجب أن يحقن الدرس المكتسب كرسالة نظام في نداء الرد.
+            # الطلب الثاني يجب أن يحقن الدرس كسياق مستخدم غير موثوق، لا كرسالة نظام.
             agent.answer("سؤال بايثون آخر")
             # نداء الرد يحمل رسالة المستخدم نصًا صريحًا، بخلاف نداء الاستخلاص
             # الذي يضع النص داخل قالب «سؤال المستخدم:».
@@ -133,7 +133,7 @@ class SelfLearnerTests(unittest.TestCase):
             self.assertTrue(answer_calls)
             self.assertTrue(
                 any(
-                    m.get("role") == "system" and "دروس مكتسبة" in m.get("content", "")
+                    m.get("role") == "user" and "دروس مكتسبة" in m.get("content", "")
                     for m in answer_calls[-1]
                 )
             )

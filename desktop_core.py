@@ -14,7 +14,14 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, build_opener
 
-from agent import DEFAULT_BASE_URL, DEFAULT_MODEL, LMStudioClient, LocalAgent
+from agent import (
+    DEFAULT_BASE_URL,
+    DEFAULT_EMBED_MODEL,
+    DEFAULT_MODEL,
+    LMStudioClient,
+    LocalAgent,
+)
+from cognitive_memory import LocalCognitiveMemoryEngine
 from mcp_client import MCPApprovalDenied, MCPRegistry
 from semantic_memory import SemanticMemory
 from session_store import SessionStore
@@ -93,6 +100,12 @@ class AppSettings:
         "session": lambda value: isinstance(value, str) and len(value) <= 128,
         "model": lambda value: isinstance(value, str) and len(value) <= 128,
         "base_url": lambda value: isinstance(value, str) and len(value) <= 512,
+        "memory_enabled": lambda value: type(value) is bool,
+        "experience_learning_enabled": lambda value: type(value) is bool,
+        "reflection_enabled": lambda value: type(value) is bool,
+        "skill_learning_enabled": lambda value: type(value) is bool,
+        "knowledge_graph_enabled": lambda value: type(value) is bool,
+        "memory_consolidation_enabled": lambda value: type(value) is bool,
     }
 
     def __init__(self, path=None):
@@ -640,6 +653,12 @@ class DesktopConfig:
     semantic_memory: bool = False
     mcp_fingerprint: str = ""
     container_engine: str = ""
+    memory_enabled: bool = True
+    experience_learning_enabled: bool = True
+    reflection_enabled: bool = True
+    skill_learning_enabled: bool = True
+    knowledge_graph_enabled: bool = True
+    memory_consolidation_enabled: bool = True
 
     @classmethod
     def parse(
@@ -652,6 +671,12 @@ class DesktopConfig:
         mcp_config="",
         semantic_memory=False,
         container_engine="",
+        memory_enabled=True,
+        experience_learning_enabled=True,
+        reflection_enabled=True,
+        skill_learning_enabled=True,
+        knowledge_graph_enabled=True,
+        memory_consolidation_enabled=True,
     ):
         if mode not in {"read", "coding", "host"}:
             raise ValueError("وضع التشغيل غير صالح")
@@ -669,7 +694,16 @@ class DesktopConfig:
             raise ValueError("اسم النموذج مطلوب")
         if not isinstance(base_url, str) or not base_url.strip():
             raise ValueError("عنوان LM Studio مطلوب")
-        if type(semantic_memory) is not bool:
+        feature_flags = (
+            semantic_memory,
+            memory_enabled,
+            experience_learning_enabled,
+            reflection_enabled,
+            skill_learning_enabled,
+            knowledge_graph_enabled,
+            memory_consolidation_enabled,
+        )
+        if any(type(value) is not bool for value in feature_flags):
             raise ValueError("إعداد الذاكرة غير صالح")
         clean_session = session.strip()
         if semantic_memory and not clean_session:
@@ -706,6 +740,12 @@ class DesktopConfig:
             semantic_memory=semantic_memory,
             mcp_fingerprint=config_fingerprint,
             container_engine=clean_engine,
+            memory_enabled=memory_enabled,
+            experience_learning_enabled=experience_learning_enabled,
+            reflection_enabled=reflection_enabled,
+            skill_learning_enabled=skill_learning_enabled,
+            knowledge_graph_enabled=knowledge_graph_enabled,
+            memory_consolidation_enabled=memory_consolidation_enabled,
         )
 
     @property
@@ -748,13 +788,27 @@ def build_local_agent(config, approver):
         if config.semantic_memory
         else None
     )
-    # تعلّم ذاتي دائم لكل مساحة عمل، مستقل عن الجلسة، ويعمل تلقائيًا.
-    try:
-        learner = SelfLearner(
-            SemanticMemory.for_workspace(config.workspace, "learned")
-        )
-    except (ValueError, RuntimeError):
-        learner = None
+    # محرك واحد معزول للمشروع؛ فشله لا يعطّل الوكيل أو الواجهة.
+    cognitive_memory = None
+    if config.memory_enabled:
+        try:
+            cognitive_memory = LocalCognitiveMemoryEngine.for_workspace(
+                config.workspace,
+                client,
+                DEFAULT_EMBED_MODEL,
+                experience_learning=config.experience_learning_enabled,
+                reflection=config.reflection_enabled,
+                skill_learning=config.skill_learning_enabled,
+                knowledge_graph=config.knowledge_graph_enabled,
+                memory_consolidation=config.memory_consolidation_enabled,
+            )
+        except (ValueError, RuntimeError):
+            pass
+    learner = (
+        SelfLearner(cognitive_memory.memory)
+        if cognitive_memory is not None
+        else None
+    )
     try:
         skill_catalog = SkillCatalog.default()
     except SkillError:
@@ -768,6 +822,7 @@ def build_local_agent(config, approver):
         memory=memory,
         skill_catalog=skill_catalog,
         learner=learner,
+        cognitive_memory=cognitive_memory,
     )
 
 

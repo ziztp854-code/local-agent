@@ -37,11 +37,15 @@ class SessionStoreTests(unittest.TestCase):
             store.save(history)
 
             self.assertEqual(store.load(), history)
+
             before = store.path.read_bytes()
             with patch("session_store.os.replace", side_effect=OSError("blocked")):
                 with self.assertRaises(OSError):
                     store.save([{"role": "user", "content": "changed"}])
             self.assertEqual(store.path.read_bytes(), before)
+            store.clear()
+            self.assertFalse(store.path.exists())
+            self.assertEqual(store.load(), [])
 
     def test_session_rejects_unsafe_names_and_invalid_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -617,7 +621,7 @@ class LocalAgentTests(unittest.TestCase):
             def __init__(self):
                 self.remembered = []
 
-            def remember(self, texts, client, model):
+            def remember(self, texts, client, model, **_metadata):
                 self.remembered.append((texts, client, model))
 
             @staticmethod
@@ -685,7 +689,7 @@ class LocalAgentTests(unittest.TestCase):
 
         class Memory:
             @staticmethod
-            def remember(*_args):
+            def remember(*_args, **_kwargs):
                 raise ValueError("sensitive text")
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -695,12 +699,10 @@ class LocalAgentTests(unittest.TestCase):
     def test_relevant_memory_is_injected_as_context_automatically(self):
         class Client:
             def __init__(self):
-                self.system_messages = []
+                self.messages = []
 
             def chat(self, messages, tools, model):
-                self.system_messages = [
-                    m["content"] for m in messages if m["role"] == "system"
-                ]
+                self.messages = messages
                 return {"choices": [{"message": {"role": "assistant", "content": "تم"}}]}
 
         class Memory:
@@ -712,7 +714,7 @@ class LocalAgentTests(unittest.TestCase):
                 ]
 
             @staticmethod
-            def remember(*_args):
+            def remember(*_args, **_kwargs):
                 return 0
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -720,7 +722,13 @@ class LocalAgentTests(unittest.TestCase):
             agent = LocalAgent(client, WorkspaceTools(temp_dir), memory=Memory())
             self.assertEqual(agent.answer("ما تفضيلاتي؟"), "تم")
 
-        injected = "\n".join(client.system_messages)
+        memory_messages = [
+            message
+            for message in client.messages
+            if "ذكريات مطابقة" in str(message.get("content", ""))
+        ]
+        self.assertEqual(memory_messages[0]["role"], "user")
+        injected = "\n".join(message["content"] for message in memory_messages)
         self.assertIn("ذكريات مطابقة", injected)
         self.assertIn("العربية الفصحى", injected)
         self.assertNotIn("تفصيل غير مرتبط", injected)  # دون العتبة الدلالية
@@ -737,7 +745,7 @@ class LocalAgentTests(unittest.TestCase):
                 raise RuntimeError("no embedding server")
 
             @staticmethod
-            def remember(*_args):
+            def remember(*_args, **_kwargs):
                 return 0
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -795,7 +803,7 @@ class LocalAgentTests(unittest.TestCase):
                 return []
 
             @staticmethod
-            def remember(*_args):
+            def remember(*_args, **_kwargs):
                 return 0
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1032,6 +1040,110 @@ class LocalAgentTests(unittest.TestCase):
         self.assertEqual(answer, "توقفت")
         self.assertIn("أداة غير مسموحة", client.tool_error)
         self.assertIn("أعد المحاولة مرة واحدة", client.tool_error)
+
+    def test_nonzero_exit_is_a_verified_failed_experience(self):
+        class CognitiveMemory:
+            def __init__(self):
+                self.attempts = []
+                self.finished = []
+                self.checkpoints = []
+                self.checkpoint_updates = []
+                self.completed_checkpoints = []
+
+            @staticmethod
+            def start_experience(task):
+                return 7
+
+            def record_tool_result(self, experience_id, name, arguments, result, *, error=""):
+                self.attempts.append((experience_id, name, arguments, result, error))
+                return {"outcome": "failure", "verified": True}
+
+            def create_checkpoint(self, task_id, plan):
+                self.checkpoints.append((task_id, plan))
+
+            def update_checkpoint(self, task_id, **updates):
+                self.checkpoint_updates.append((task_id, updates))
+
+            def finish_experience(self, experience_id):
+                self.finished.append(experience_id)
+
+            def complete_checkpoint(self, task_id):
+                self.completed_checkpoints.append(task_id)
+
+        class CommandWorkspace:
+            @staticmethod
+            def tool_schemas():
+                return [{"type": "function", "function": {
+                    "name": "run_command", "parameters": {"type": "object"}
+                }}]
+
+            @staticmethod
+            def dispatch(*_args):
+                return {"status": "completed", "exit_code": 2, "output": "failed"}
+
+        class CommandClient:
+            def __init__(self):
+                self.calls = 0
+                self.tool_result = ""
+
+            def chat(self, messages, tools, model):
+                self.calls += 1
+                if self.calls == 1:
+                    return {"choices": [{"message": {"role": "assistant", "tool_calls": [
+                        {"id": "command", "function": {
+                            "name": "run_command",
+                            "arguments": '{"argv":["python","-m","pytest"]}',
+                        }}
+                    ]}}]}
+                self.tool_result = messages[-1]["content"]
+                return {"choices": [{"message": {"role": "assistant", "content": "تم"}}]}
+
+        memory = CognitiveMemory()
+        events = list(LocalAgent(
+            CommandClient(), CommandWorkspace(), cognitive_memory=memory
+        )._answer_events("شغّل الاختبارات", (), stream=False))
+
+        tool_end = next(event for event in events if event["type"] == "tool_end")
+        self.assertEqual(tool_end["status"], "error")
+        self.assertEqual(memory.attempts[0][3]["exit_code"], 2)
+        self.assertEqual(memory.finished, [7])
+        self.assertEqual(memory.checkpoints[0][0], "experience-7")
+        self.assertTrue(memory.checkpoint_updates[0][1]["last_failure"]["verified"])
+        self.assertEqual(memory.completed_checkpoints, ["experience-7"])
+
+    def test_cognitive_memory_disables_model_only_lesson_promotion(self):
+        class Learner:
+            def __init__(self):
+                self.learned = 0
+
+            @staticmethod
+            def recall_note(*_args):
+                return None
+
+            def learn(self, *_args):
+                self.learned += 1
+
+        class CognitiveMemory:
+            @staticmethod
+            def start_experience(_task):
+                return 1
+
+            @staticmethod
+            def finish_experience(_experience_id):
+                return {"status": "unverified"}
+
+        class Client:
+            @staticmethod
+            def chat(*_args):
+                return {"choices": [{"message": {"role": "assistant", "content": "تم"}}]}
+
+        learner = Learner()
+        answer = LocalAgent(
+            Client(), object(), learner=learner, cognitive_memory=CognitiveMemory()
+        ).answer("قل إن المهمة نجحت")
+
+        self.assertEqual(answer, "تم")
+        self.assertEqual(learner.learned, 0)
 
     def test_repeated_identical_failing_call_is_short_circuited(self):
         class RepeatingWorkspace:

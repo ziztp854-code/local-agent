@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 try:
@@ -28,6 +28,8 @@ from desktop_core import (
     probe_model_server,
 )
 from mcp_client import MCPRegistry
+from memory_panel import MemoryPanel
+from session_store import SessionStore
 from skill_panel import SkillsPanel
 import theme
 from theme import COLORS, DARK_COLORS
@@ -145,6 +147,13 @@ class LocalAgentApp:
         self.base_url_var = tk.StringVar(value=DEFAULT_BASE_URL)
         self.mcp_config_var = tk.StringVar()
         self.semantic_memory_var = tk.BooleanVar(value=False)
+        self.memory_enabled_var = tk.BooleanVar(value=True)
+        self.experience_learning_var = tk.BooleanVar(value=True)
+        self.reflection_var = tk.BooleanVar(value=True)
+        self.skill_learning_var = tk.BooleanVar(value=True)
+        self.knowledge_graph_var = tk.BooleanVar(value=True)
+        self.memory_consolidation_var = tk.BooleanVar(value=True)
+        self._memory_feature_checks = []
         self.container_engine_var = tk.StringVar()
         self.pending_images = []
         self.image_note_var = tk.StringVar(value="لا توجد صور مرفقة")
@@ -168,6 +177,16 @@ class LocalAgentApp:
         if saved.get("mode") in MODE_LABELS:
             self.mode_var.set(saved["mode"])
         self._saved_dark_theme = bool(saved.get("dark_theme", True))
+        for key, variable in (
+            ("memory_enabled", self.memory_enabled_var),
+            ("experience_learning_enabled", self.experience_learning_var),
+            ("reflection_enabled", self.reflection_var),
+            ("skill_learning_enabled", self.skill_learning_var),
+            ("knowledge_graph_enabled", self.knowledge_graph_var),
+            ("memory_consolidation_enabled", self.memory_consolidation_var),
+        ):
+            if key in saved:
+                variable.set(saved[key])
 
         self._configure_window()
         self._build_ui()
@@ -184,6 +203,7 @@ class LocalAgentApp:
         self.root.bind(
             "<Control-Key-4>", lambda event: self._select_tab(self.integrations_page)
         )
+        self.root.bind("<Control-Key-5>", lambda event: self._select_tab(self.memory_page))
         self.root.bind("<Control-o>", lambda event: self.choose_workspace())
         self.root.bind("<Control-Shift-O>", lambda event: self.choose_images())
         self.root.bind("<Control-f>", self._focus_skill_search)
@@ -384,17 +404,17 @@ class LocalAgentApp:
         # يُبقي stats_label اسمًا متوافقًا مع بقية الشيفرة (نصّ رقاقة الإحصاءات).
         self.stats_label = self.stats_chip
 
-        body = tk.Frame(self.root, bg=COLORS["fog"], padx=6, pady=6)
+        body = tk.Frame(self.root, bg=COLORS["fog"], padx=8, pady=8)
         body.grid(row=2, column=0, sticky="nsew")
         body.grid_rowconfigure(0, weight=1)
-        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, weight=1)
 
         footer = tk.Frame(self.root, bg=COLORS["surface"], padx=20, pady=8)
         footer.grid(row=3, column=0, sticky="ew")
         self.footer_hint = tk.Label(
             footer,
             text=(
-                "Ctrl+Enter إرسال   ·   Ctrl+1…4 التبويبات   ·   Ctrl+F البحث   "
+                "Ctrl+Enter إرسال   ·   Ctrl+1…5 التبويبات   ·   Ctrl+F البحث   "
                 "·   Ctrl+L فحص الاتصال   ·   Ctrl+K لوحة الأوامر"
             ),
             bg=COLORS["surface"],
@@ -403,16 +423,87 @@ class LocalAgentApp:
         )
         self.footer_hint.pack(side="right")
 
+        self.navigation_panel = tk.Frame(
+            body, bg=COLORS["surface"], width=228,
+            highlightthickness=1, highlightbackground=COLORS["line"],
+            padx=12, pady=16,
+        )
+        self.navigation_panel.grid(row=0, column=0, sticky="ns", padx=(0, 10))
+        self.navigation_panel.grid_propagate(False)
+
         main = tk.Frame(body, bg=COLORS["fog"])
-        main.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        main.grid(row=0, column=1, sticky="nsew")
         main.grid_rowconfigure(0, weight=1)
         main.grid_columnconfigure(0, weight=1)
-        sidebar = tk.Frame(body, bg=COLORS["surface"], width=320, padx=20, pady=18)
-        sidebar.grid(row=0, column=1, sticky="ns")
+        sidebar = tk.Frame(
+            body, bg=COLORS["surface"], width=292,
+            highlightthickness=1, highlightbackground=COLORS["line"],
+            padx=16, pady=18,
+        )
+        sidebar.grid(row=0, column=2, sticky="ns", padx=(10, 0))
         sidebar.grid_propagate(False)
 
+        self._build_navigation(self.navigation_panel)
         self._build_sidebar(sidebar)
         self._build_main(main)
+
+    def _build_navigation(self, parent):
+        """تنقّل ثابت خفيف؛ الصفحات الفعلية تبقى في دفتر الواجهة المركزي."""
+        brand = tk.Frame(parent, bg=COLORS["surface"])
+        brand.pack(fill="x", pady=(0, 24))
+        tk.Label(
+            brand, text="◆", bg=COLORS["soft_teal"], fg=COLORS["teal"],
+            font=theme.display_font(24), padx=9, pady=5,
+        ).pack(side="left")
+        brand_copy = tk.Frame(brand, bg=COLORS["surface"])
+        brand_copy.pack(side="right", fill="x", expand=True, padx=(8, 0))
+        tk.Label(
+            brand_copy, text="الوكيل المحلي", bg=COLORS["surface"], fg=COLORS["ink"],
+            font=theme.ui_font(12, "bold"), anchor="e",
+        ).pack(fill="x")
+        tk.Label(
+            brand_copy, text="مساعدك الذكي على جهازك", bg=COLORS["surface"],
+            fg=COLORS["muted"], font=theme.ui_font(8), anchor="e",
+        ).pack(fill="x")
+
+        self._navigation_buttons = []
+        items = (
+            ("المحادثة", "◯", lambda: self._select_tab(self.chat_page)),
+            ("المهام", "☑", lambda: self._select_tab(self.changes_page)),
+            ("التطبيقات", "▦", lambda: self._select_tab(self.skills_page)),
+            ("الذاكرة", "◈", lambda: self._select_tab(self.memory_page)),
+            ("التكاملات", "⌘", lambda: self._select_tab(self.integrations_page)),
+            ("إعدادات", "⚙", lambda: self._select_tab(self.integrations_page)),
+        )
+        for index, (label, icon, command) in enumerate(items):
+            button = tk.Button(
+                parent, text=f"{icon}    {label}",
+                command=command,
+                bg=COLORS["soft_teal"] if index == 0 else COLORS["surface"],
+                fg=COLORS["teal"] if index == 0 else COLORS["chip_fg"],
+                activebackground=COLORS["elevated"], activeforeground=COLORS["teal"],
+                relief="flat", borderwidth=0, anchor="e",
+                padx=14, pady=11, font=theme.ui_font(11, "bold" if index == 0 else "normal"),
+                cursor="hand2",
+            )
+            button.pack(fill="x", pady=(0, 4))
+            self._navigation_buttons.append(button)
+
+        spacer = tk.Frame(parent, bg=COLORS["surface"])
+        spacer.pack(fill="both", expand=True)
+        status = tk.Frame(
+            parent, bg=COLORS["secondary_bg"], highlightthickness=1,
+            highlightbackground=COLORS["line"], padx=12, pady=12,
+        )
+        status.pack(fill="x")
+        tk.Label(
+            status, text="●  جاهز للعمل", bg=COLORS["secondary_bg"],
+            fg=COLORS["success"], font=theme.ui_font(10, "bold"), anchor="e",
+        ).pack(fill="x")
+        tk.Label(
+            status, text="الوضع المحلي", bg=COLORS["secondary_bg"], fg=COLORS["muted"],
+            font=theme.ui_font(8), anchor="e",
+        ).pack(fill="x", pady=(4, 0))
 
     def _build_trust_chip(self, parent, variable, icon, dot, side="right", tooltip=""):
         """رقاقة حالة على هيئة حبّة (pill): نقطة حالة + نص + أيقونة + تلميح."""
@@ -520,6 +611,18 @@ class LocalAgentApp:
 
         self._field_label(parent, "اسم الجلسة · اختياري (مثال: تحسين واجهة التطبيق)")
         self.session_entry = self._entry(parent, self.session_var)
+        self.clear_session_button = tk.Button(
+            parent,
+            text="مسح ذاكرة الجلسة",
+            command=self.clear_session_memory,
+            bg=COLORS["secondary_bg"],
+            fg=COLORS["muted"],
+            relief="flat",
+            padx=10,
+            pady=6,
+            cursor="hand2",
+        )
+        self.clear_session_button.pack(fill="x", pady=(0, 8))
 
         self.apply_button = tk.Button(
             parent,
@@ -536,15 +639,30 @@ class LocalAgentApp:
             cursor="hand2",
         )
         self.apply_button.pack(fill="x", pady=(8, 14))
+        tk.Frame(parent, bg=COLORS["surface"]).pack(fill="both", expand=True)
+        self.privacy_card = tk.Frame(
+            parent, bg=COLORS["soft_teal"], highlightthickness=1,
+            highlightbackground=COLORS["line"], padx=14, pady=13,
+        )
+        self.privacy_card.pack(fill="x", pady=(0, 10))
         tk.Label(
-            parent,
-            text="لن يكتب الوكيل أو يشغّل أمرًا دون موافقة مستقلة.",
-            bg=COLORS["surface"],
-            fg=COLORS["muted"],
-            justify="right",
-            anchor="e",
-            wraplength=245,
-        ).pack(fill="x", side="bottom")
+            self.privacy_card, text="◈  خصوصيتك أولًا", bg=COLORS["soft_teal"],
+            fg=COLORS["ink"], font=theme.ui_font(11, "bold"), anchor="e",
+        ).pack(fill="x")
+        tk.Label(
+            self.privacy_card,
+            text="تبقى المحادثة محليًا؛ وأي تكامل شبكي يحتاج موافقتك.",
+            bg=COLORS["soft_teal"], fg=COLORS["muted"], justify="right",
+            anchor="e", wraplength=235, font=theme.ui_font(9),
+        ).pack(fill="x", pady=(7, 0))
+        self.permissions_button = tk.Button(
+            parent, text="⚙  إدارة الصلاحيات",
+            command=lambda: self._select_tab(self.integrations_page),
+            bg=COLORS["secondary_bg"], activebackground=COLORS["elevated"],
+            fg=COLORS["ink"], padx=12, pady=10, anchor="center",
+            font=theme.ui_font(9, "bold"), relief="flat", cursor="hand2",
+        )
+        self.permissions_button.pack(fill="x")
 
     @staticmethod
     def _field_label(parent, text):
@@ -587,15 +705,17 @@ class LocalAgentApp:
         tab_bar = tk.Frame(board, bg=COLORS["surface"])
         tab_bar.grid(row=0, column=0, sticky="ew", pady=(8, 0))
         tab_center = tk.Frame(tab_bar, bg=COLORS["surface"])
-        tab_center.pack(anchor="center")  # pack بلا side يوسّط أفقيًا
+        tab_center.pack(anchor="e", padx=8)
 
         notebook = ttk.Notebook(board, style="Center.TNotebook")
         notebook.grid(row=1, column=0, sticky="nsew", padx=6, pady=(4, 6))
         self.chat_page = tk.Frame(notebook, bg=COLORS["surface"])
         self.changes_page = tk.Frame(notebook, bg=COLORS["surface"])
         self.skills_page = tk.Frame(notebook, bg=COLORS["surface"])
+        self.memory_page = tk.Frame(notebook, bg=COLORS["surface"])
         self.integrations_page = tk.Frame(notebook, bg=COLORS["surface"])
         notebook.add(self.integrations_page, text="التكاملات  🗄")
+        notebook.add(self.memory_page, text="الذاكرة  ◈")
         notebook.add(self.skills_page, text="المهارات  🧩")
         notebook.add(self.changes_page, text="التغييرات  🔀")
         notebook.add(self.chat_page, text="المحادثة  💬")
@@ -607,6 +727,7 @@ class LocalAgentApp:
             (self.chat_page, "المحادثة  💬"),
             (self.changes_page, "التغييرات  🔀"),
             (self.skills_page, "المهارات  🧩"),
+            (self.memory_page, "الذاكرة  ◈"),
             (self.integrations_page, "التكاملات  🗄"),
         ):
             cell = tk.Frame(tab_center, bg=COLORS["surface"])
@@ -759,14 +880,14 @@ class LocalAgentApp:
         self.empty_state = tk.Frame(chat_page, bg=COLORS["surface"])
         self.empty_state.grid(row=2, column=0, sticky="nsew")
         center = tk.Frame(self.empty_state, bg=COLORS["surface"])
-        center.place(relx=0.5, rely=0.42, anchor="center")
+        center.place(relx=0.5, rely=0.46, anchor="center")
         tk.Label(
             center, text="◆", bg=COLORS["surface"], fg=COLORS["teal"],
-            font=theme.display_font(46),
+            font=theme.display_font(38),
         ).pack()
         tk.Label(
             center, text="كيف يمكنني مساعدتك؟", bg=COLORS["surface"], fg=COLORS["ink"],
-            font=theme.display_font(22),
+            font=theme.display_font(24),
         ).pack(pady=(14, 6))
         tk.Label(
             center,
@@ -774,6 +895,35 @@ class LocalAgentApp:
             bg=COLORS["surface"], fg=COLORS["muted"], font=theme.ui_font(12),
             justify="center", wraplength=520,
         ).pack()
+        cards = tk.Frame(center, bg=COLORS["surface"])
+        cards.pack(pady=(28, 0))
+        self.starter_cards = []
+        for icon, title, detail, color in (
+            ("⚙", "أتمتة المهام", "تنفيذ مهام متعددة\nعلى جهازك", COLORS["teal"]),
+            ("☼", "بناء المعرفة", "البحث والتلخيص\nوتوليد الأفكار", COLORS["copper"]),
+            ("</>", "مساعدة البرمجة", "كتابة وتعديل الأكواد\nوإصلاح الأخطاء", COLORS["info"]),
+            ("▣", "تحليل الملفات", "قراءة وفهم الملفات\nداخل مشروعك", "#B96CFF"),
+        ):
+            card = tk.Frame(
+                cards, width=168, height=190, bg=COLORS["secondary_bg"],
+                highlightthickness=1, highlightbackground=COLORS["line"],
+                padx=12, pady=10,
+            )
+            card.pack(side="right", padx=6)
+            card.pack_propagate(False)
+            tk.Label(
+                card, text=icon, bg=COLORS["soft_teal"], fg=color,
+                font=theme.ui_font(17, "bold"), padx=7, pady=3,
+            ).pack()
+            tk.Label(
+                card, text=title, bg=COLORS["secondary_bg"], fg=COLORS["ink"],
+                font=theme.ui_font(10, "bold"),
+            ).pack(pady=(7, 3))
+            tk.Label(
+                card, text=detail, bg=COLORS["secondary_bg"], fg=COLORS["muted"],
+                font=theme.ui_font(8), justify="center",
+            ).pack()
+            self.starter_cards.append(card)
         self._empty_state_visible = True
 
         composer = tk.Frame(chat_page, bg=COLORS["fog"], padx=14, pady=8)
@@ -953,11 +1103,59 @@ class LocalAgentApp:
             self.skills_page, catalog=self._skill_catalog, colors=self.colors
         )
         self.skills_badge_var.set(f"المهارات: {self.skill_panel.count} متاحة")
+        self.memory_panel = MemoryPanel(
+            self.memory_page,
+            lambda: getattr(self.controller.agent, "cognitive_memory", None),
+            self.colors,
+        )
         self._build_integrations(self.integrations_page)
 
     def _build_integrations(self, parent):
-        panel = tk.Frame(parent, bg=COLORS["surface"], padx=28, pady=24)
-        panel.pack(fill="both", expand=True)
+        self.integrations_canvas = tk.Canvas(
+            parent,
+            bg=COLORS["surface"],
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self.integrations_scrollbar = ttk.Scrollbar(
+            parent,
+            orient="vertical",
+            command=self.integrations_canvas.yview,
+        )
+        self.integrations_canvas.configure(
+            yscrollcommand=self.integrations_scrollbar.set
+        )
+        self.integrations_scrollbar.pack(side="left", fill="y")
+        self.integrations_canvas.pack(side="right", fill="both", expand=True)
+        panel = tk.Frame(
+            self.integrations_canvas,
+            bg=COLORS["surface"],
+            padx=28,
+            pady=24,
+        )
+        self.integrations_panel = panel
+        panel_window = self.integrations_canvas.create_window(
+            (0, 0), window=panel, anchor="nw"
+        )
+        panel.bind(
+            "<Configure>",
+            lambda _event: self.integrations_canvas.configure(
+                scrollregion=self.integrations_canvas.bbox("all")
+            ),
+        )
+        self.integrations_canvas.bind(
+            "<Configure>",
+            lambda event: self.integrations_canvas.itemconfigure(
+                panel_window, width=event.width
+            ),
+        )
+        for widget in (self.integrations_canvas, panel):
+            widget.bind(
+                "<MouseWheel>",
+                lambda event: self.integrations_canvas.yview_scroll(
+                    -1 if event.delta > 0 else 1, "units"
+                ),
+            )
         tk.Label(
             panel,
             text="النموذج والتكاملات",
@@ -1053,6 +1251,27 @@ class LocalAgentApp:
             anchor="e",
             wraplength=650,
         ).pack(fill="x", pady=(6, 0))
+        self._field_label(panel, "ذاكرة المشروع والتعلّم المحلي")
+        for text, variable in (
+            ("تفعيل ذاكرة المشروع", self.memory_enabled_var),
+            ("التعلّم من نتائج التنفيذ", self.experience_learning_var),
+            ("إنشاء انعكاس منظم", self.reflection_var),
+            ("ترقية الأنماط إلى مهارات", self.skill_learning_var),
+            ("الرسم المعرفي المحلي", self.knowledge_graph_var),
+            ("دمج الذكريات المتطابقة", self.memory_consolidation_var),
+        ):
+            check = tk.Checkbutton(
+                panel,
+                text=text,
+                variable=variable,
+                command=self._configuration_changed,
+                bg=COLORS["surface"],
+                fg=COLORS["ink"],
+                activebackground=COLORS["surface"],
+                anchor="e",
+            )
+            check.pack(fill="x", pady=(4, 0))
+            self._memory_feature_checks.append(check)
 
     def _selected_mode(self):
         return MODE_LABELS.get(self.mode_var.get(), "")
@@ -1067,6 +1286,12 @@ class LocalAgentApp:
             mcp_config=self.mcp_config_var.get(),
             semantic_memory=self.semantic_memory_var.get(),
             container_engine=self.container_engine_var.get(),
+            memory_enabled=self.memory_enabled_var.get(),
+            experience_learning_enabled=self.experience_learning_var.get(),
+            reflection_enabled=self.reflection_var.get(),
+            skill_learning_enabled=self.skill_learning_var.get(),
+            knowledge_graph_enabled=self.knowledge_graph_var.get(),
+            memory_consolidation_enabled=self.memory_consolidation_var.get(),
         )
 
     def apply_configuration(self):
@@ -1088,6 +1313,7 @@ class LocalAgentApp:
         else:
             self._append_chat("assistant", self._smart_briefing(config.workspace))
         self._set_status("جاهز", "teal")
+        self.memory_panel.refresh()
         self.save_settings()
         self.check_connection()
         self.prompt_text.focus_set()
@@ -1098,6 +1324,40 @@ class LocalAgentApp:
         if selected:
             self.workspace_var.set(selected)
             self._active_config = None
+
+    def clear_session_memory(self):
+        if self.controller.busy:
+            self._set_status("انتظر انتهاء الطلب الحالي", "copper")
+            return False
+        session_name = self.session_var.get().strip()
+        workspace = self.workspace_var.get().strip()
+        if not session_name or not workspace:
+            self._set_status("اختر مساحة عمل واكتب اسم الجلسة أولًا", "copper")
+            return False
+        if not messagebox.askyesno(
+            "مسح ذاكرة الجلسة",
+            "سيُحذف سجل هذه الجلسة المحلي من التطبيق. متابعة؟",
+            parent=self.root,
+        ):
+            return False
+        try:
+            store = SessionStore(workspace, session_name)
+            store.clear()
+            agent = self.controller.agent
+            memory = getattr(agent, "memory", None)
+            forget_source = getattr(memory, "forget_source", None)
+            if callable(forget_source):
+                forget_source(f"session:{session_name}")
+            if agent is not None:
+                agent.history = [agent.history[0]]
+                agent._archive = []
+            self._clear_transcript()
+            self._append_chat("assistant", self._smart_briefing(workspace))
+        except (OSError, RuntimeError, ToolError, ValueError) as error:
+            self._set_status(safe_terminal_text(error), "danger")
+            return False
+        self._set_status("تم مسح ذاكرة الجلسة", "teal")
+        return True
 
     def open_workspace_folder(self):
         """افتح مجلد مساحة العمل في مستكشف الملفات (إن كان موجودًا)."""
@@ -1193,6 +1453,12 @@ class LocalAgentApp:
             "session": self.session_var.get(),
             "model": self.model_var.get(),
             "base_url": self.base_url_var.get(),
+            "memory_enabled": self.memory_enabled_var.get(),
+            "experience_learning_enabled": self.experience_learning_var.get(),
+            "reflection_enabled": self.reflection_var.get(),
+            "skill_learning_enabled": self.skill_learning_var.get(),
+            "knowledge_graph_enabled": self.knowledge_graph_var.get(),
+            "memory_consolidation_enabled": self.memory_consolidation_var.get(),
         })
 
     def choose_images(self):
@@ -1444,6 +1710,7 @@ class LocalAgentApp:
             ("فتح تبويب المحادثة", lambda: self._select_tab(self.chat_page)),
             ("فتح تبويب التغييرات", lambda: self._select_tab(self.changes_page)),
             ("فتح تبويب المهارات", lambda: self._select_tab(self.skills_page)),
+            ("فتح تبويب الذاكرة", lambda: self._select_tab(self.memory_page)),
             ("فتح تبويب التكاملات", lambda: self._select_tab(self.integrations_page)),
             ("تحديث عرض التغييرات", self.refresh_changes),
             ("تراجع عن آخر تعديل", self.undo_last),
@@ -1528,6 +1795,7 @@ class LocalAgentApp:
                 self._record_stat("completed")
                 self._set_status("اكتمل الرد", "teal")
             self._set_busy(False)
+            self.memory_panel.refresh(announce=True)
             if not self._closing and self.status_var.get().startswith("الوكيل يعمل"):
                 self._set_status("جاهز", "teal")
             if self._approval_dialog is None:
@@ -1693,12 +1961,15 @@ class LocalAgentApp:
         self.undo_button.configure(state=normal)
         self.workspace_entry.configure(state=normal)
         self.session_entry.configure(state=normal)
+        self.clear_session_button.configure(state=normal)
         self.model_combo.configure(state="disabled" if busy else "normal")
         self.refresh_models_button.configure(state=normal)
         self.base_url_entry.configure(state=normal)
         self.mcp_entry.configure(state=normal)
         self.mcp_button.configure(state=normal)
         self.memory_check.configure(state=normal)
+        for check in self._memory_feature_checks:
+            check.configure(state=normal)
         self.images_button.configure(state=normal)
         self.clear_images_button.configure(state=normal)
         self.mode_combo.configure(state="disabled" if busy else "readonly")
@@ -1731,6 +2002,23 @@ class LocalAgentApp:
             background=[("selected", self.colors["surface"])],
             foreground=[("selected", self.colors["ink"])],
         )
+        style.configure(
+            "TCombobox",
+            fieldbackground=self.colors["secondary_bg"],
+            background=self.colors["secondary_bg"],
+            foreground=self.colors["ink"],
+            arrowcolor=self.colors["muted"],
+            bordercolor=self.colors["line"],
+            lightcolor=self.colors["line"],
+            darkcolor=self.colors["line"],
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", self.colors["secondary_bg"])],
+            foreground=[("readonly", self.colors["ink"])],
+            selectbackground=[("readonly", self.colors["secondary_bg"])],
+            selectforeground=[("readonly", self.colors["ink"])],
+        )
 
     @staticmethod
     def _restyle_tree(widget, old, new):
@@ -1744,6 +2032,10 @@ class LocalAgentApp:
             old["teal"]: new["teal"],
             old["copper"]: new["copper"],
             old["danger"]: new["danger"],
+            old["secondary_bg"]: new["secondary_bg"],
+            old["elevated"]: new["elevated"],
+            old["chip"]: new["chip"],
+            old["band_bg"]: new["band_bg"],
             }
         foreground = {
             old["ink"]: new["ink"],
@@ -1751,7 +2043,17 @@ class LocalAgentApp:
             old["teal"]: new["teal"],
             old["copper"]: new["copper"],
             old["danger"]: new["danger"],
+            old["chip_fg"]: new["chip_fg"],
         }
+        if isinstance(widget, tk.Entry):
+            try:
+                widget.configure(
+                    bg=new["secondary_bg"], fg=new["ink"],
+                    insertbackground=new["teal"], readonlybackground=new["secondary_bg"],
+                    highlightbackground=new["line"], highlightcolor=new["focus"],
+                )
+            except tk.TclError:
+                pass
         try:
             current = str(widget.cget("background"))
             if current in background:
@@ -1762,6 +2064,15 @@ class LocalAgentApp:
             current = str(widget.cget("foreground"))
             if current in foreground:
                 widget.configure(foreground=foreground[current])
+        except tk.TclError:
+            pass
+        try:
+            current = str(widget.cget("highlightbackground"))
+            if current == old["line"]:
+                widget.configure(highlightbackground=new["line"])
+            current = str(widget.cget("highlightcolor"))
+            if current == old["focus"]:
+                widget.configure(highlightcolor=new["focus"])
         except tk.TclError:
             pass
         for child in widget.winfo_children():
@@ -1852,6 +2163,7 @@ class LocalAgentApp:
             "diff_hunk", foreground=self.colors["copper"] if self._dark_theme else "#3730A3"
         )
         self._configure_theme_styles()
+        self.memory_panel.apply_colors(self.colors)
         self._sync_tab_buttons()
         self._update_mode_ui()
         self.transcript.tag_configure("tool", foreground=self.colors["muted"])
@@ -1895,6 +2207,20 @@ class LocalAgentApp:
                 underline.configure(
                     bg=self.colors["teal"] if active else self.colors["surface"]
                 )
+        navigation_pages = (
+            self.chat_page,
+            self.changes_page,
+            self.skills_page,
+            self.memory_page,
+            self.integrations_page,
+            self.integrations_page,
+        )
+        for button, page in zip(self._navigation_buttons, navigation_pages, strict=True):
+            active = str(page) == current
+            button.configure(
+                bg=self.colors["soft_teal"] if active else self.colors["surface"],
+                fg=self.colors["teal"] if active else self.colors["chip_fg"],
+            )
 
     def _focus_skill_search(self, _event=None):
         self.notebook.select(self.skills_page)

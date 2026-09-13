@@ -56,6 +56,52 @@ class SemanticMemoryTests(unittest.TestCase):
         self.assertEqual([row["text"] for row in rows], ["alpha", "beta"])
         self.assertEqual(rows[0]["model"], "nomic")
 
+    def test_old_unique_constraint_is_migrated_to_include_memory_kind(self):
+        old_schema = """
+        CREATE TABLE records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hash TEXT NOT NULL,
+            model TEXT NOT NULL,
+            dimension INTEGER NOT NULL,
+            embedding BLOB NOT NULL,
+            text TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL,
+            supersedes INTEGER,
+            superseded_by INTEGER,
+            UNIQUE(hash, model)
+        );
+        """
+        with open_memory(self.path) as connection:
+            connection.executescript(old_schema)
+
+        client = FakeClient({"shared text": [1.0, 0.0]})
+        memory = SemanticMemory(self.path)
+        memory.remember(["shared text"], client, "nomic", kind="semantic")
+        memory.remember(["shared text"], client, "nomic", kind="project")
+
+        with open_memory(self.path) as connection:
+            rows = connection.execute(
+                "SELECT kind FROM records ORDER BY id"
+            ).fetchall()
+        self.assertEqual([row["kind"] for row in rows], ["semantic", "project"])
+
+    def test_forget_source_only_removes_selected_session_memory(self):
+        client = FakeClient({"first": [1.0, 0.0], "second": [0.0, 1.0]})
+        memory = SemanticMemory(self.path)
+        memory.remember(
+            ["first"], client, "nomic", source="session:first", kind="conversation"
+        )
+        memory.remember(
+            ["second"], client, "nomic", source="session:second", kind="conversation"
+        )
+
+        memory.forget_source("session:first")
+
+        with open_memory(self.path) as connection:
+            sources = connection.execute("SELECT source FROM records").fetchall()
+        self.assertEqual([row["source"] for row in sources], ["session:second"])
+
     def test_for_workspace_uses_a_stable_safe_state_path(self):
         state = Path(self.temporary.name) / "state"
         workspace = Path(self.temporary.name) / "project"
@@ -457,6 +503,50 @@ private-material
         query = SemanticMemory._fts_query('neo" OR 1=1 --')
         self.assertNotIn("OR", query.replace('"OR"', ""))
         self.assertNotIn("--", query)
+
+    def test_decay_weakens_old_unpinned_memory_but_not_pinned_memory(self):
+        client = FakeClient({"old": [1.0, 0.0], "new": [1.0, 0.0], "query": [1.0, 0.0]})
+        memory = SemanticMemory(self.path)
+        memory.remember(["old", "new"], client, "nomic", kind="project")
+        with open_memory(self.path) as connection:
+            old_id, new_id = [
+                row[0] for row in connection.execute("SELECT id FROM records ORDER BY id")
+            ]
+            connection.execute(
+                "UPDATE records SET created_at=?, last_accessed=? WHERE id=?",
+                (1.0, 1.0, old_id),
+            )
+            connection.execute("UPDATE records SET pinned=1 WHERE id=?", (new_id,))
+            connection.commit()
+
+        result = memory.recall("query", client, "nomic", limit=2)
+
+        self.assertEqual(result[0]["id"], new_id)
+        self.assertGreater(result[0]["score"], result[1]["score"])
+
+    def test_memory_controls_and_consolidation_preserve_provenance(self):
+        client = FakeClient({"same fact": [1.0, 0.0]})
+        memory = SemanticMemory(self.path)
+        memory.remember(["same fact"], client, "nomic", kind="project")
+        memory.remember(["same fact"], client, "nomic", kind="preference")
+
+        consolidated = memory.consolidate()
+        with open_memory(self.path) as connection:
+            rows = connection.execute(
+                "SELECT id, superseded_by, archived FROM records ORDER BY id"
+            ).fetchall()
+
+        self.assertEqual(consolidated, 1)
+        self.assertEqual(sum(row[2] == 0 for row in rows), 1)
+        self.assertEqual(sum(row[1] is not None for row in rows), 1)
+        canonical = next(row[0] for row in rows if row[2] == 0)
+        memory.set_pinned(canonical, True)
+        self.assertTrue(memory.record(canonical, client, "nomic")["pinned"])
+        memory.set_archived(canonical, True)
+        self.assertTrue(memory.record(canonical, client, "nomic")["archived"])
+        memory.forget(canonical)
+        with self.assertRaises(ValueError):
+            memory.record(canonical, client, "nomic")
 
 
 if __name__ == "__main__":

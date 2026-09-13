@@ -37,6 +37,33 @@ _CANDIDATE_CAP = 256
 _MAX_FTS_TERMS = 32
 _RECORD_OVERHEAD_BYTES = 160
 _CACHE_OVERHEAD_BYTES = 96
+_MEMORY_KINDS = (
+    "semantic",
+    "conversation",
+    "preference",
+    "project",
+    "episodic",
+    "experience",
+    "procedural",
+    "temporal",
+    "skill",
+)
+_KIND_HALF_LIFE_DAYS = {
+    "semantic": 90,
+    "conversation": 30,
+    "preference": 180,
+    "project": 180,
+    "episodic": 30,
+    "experience": 120,
+    "procedural": 180,
+    "temporal": 90,
+    "skill": 180,
+}
+_IMPORTANCE_WEIGHT = 0.15      # ميل تمديد نصف العمر لكل درجة أهمية عن 5.
+_IMPORTANCE_SLOPE = 0.05       # مضاعف نقاط مباشر لكل درجة أهمية عن 5.
+_FEEDBACK_STEP = 0.1           # إزاحة EMA لكل استرجاع نحو 1.0.
+_FEEDBACK_MIN = 0.5
+_DECAY_FLOOR = 0.05
 
 
 class SemanticMemory:
@@ -240,7 +267,16 @@ class SemanticMemory:
         created_at REAL NOT NULL,
         supersedes INTEGER,
         superseded_by INTEGER,
-        UNIQUE(hash, model)
+        kind TEXT NOT NULL DEFAULT 'semantic',
+        importance INTEGER NOT NULL DEFAULT 5,
+        feedback REAL NOT NULL DEFAULT 0.5,
+        access_count INTEGER NOT NULL DEFAULT 0,
+        last_accessed REAL,
+        success_count INTEGER NOT NULL DEFAULT 0,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        pinned INTEGER NOT NULL DEFAULT 0,
+        archived INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(hash, model, kind)
     );
     CREATE TABLE IF NOT EXISTS cache (
         rowid_ INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -251,6 +287,56 @@ class SemanticMemory:
     );
     CREATE INDEX IF NOT EXISTS cache_model ON cache(model, rowid_);
     """
+
+    _MIGRATION_COLUMNS = {
+        "kind": "TEXT NOT NULL DEFAULT 'semantic'",
+        "importance": "INTEGER NOT NULL DEFAULT 5",
+        "feedback": "REAL NOT NULL DEFAULT 0.5",
+        "access_count": "INTEGER NOT NULL DEFAULT 0",
+        "last_accessed": "REAL",
+        "success_count": "INTEGER NOT NULL DEFAULT 0",
+        "failure_count": "INTEGER NOT NULL DEFAULT 0",
+        "pinned": "INTEGER NOT NULL DEFAULT 0",
+        "archived": "INTEGER NOT NULL DEFAULT 0",
+    }
+
+    def _migrate_schema(self, connection):
+        """أضف أعمدة المرحلة 2 لقواعد المرحلة 1 إن لم توجد."""
+        existing = {
+            row[1] for row in connection.execute("PRAGMA table_info(records)")
+        }
+        for column, definition in self._MIGRATION_COLUMNS.items():
+            if column not in existing:
+                connection.execute(
+                    f"ALTER TABLE records ADD COLUMN {column} {definition}"
+                )
+        unique_columns = {
+            tuple(
+                row[2]
+                for row in connection.execute(
+                    "SELECT seqno, cid, name FROM pragma_index_info(?)",
+                    (index[1],),
+                )
+            )
+            for index in connection.execute("PRAGMA index_list(records)")
+            if index[2]
+        }
+        if ("hash", "model") in unique_columns and (
+            "hash", "model", "kind"
+        ) not in unique_columns:
+            connection.execute("ALTER TABLE records RENAME TO records_legacy_unique")
+            connection.executescript(self._SCHEMA)
+            columns = (
+                "id, hash, model, dimension, embedding, text, source, created_at,"
+                " supersedes, superseded_by, kind, importance, feedback, access_count,"
+                " last_accessed, success_count, failure_count, pinned, archived"
+            )
+            connection.execute(
+                f"INSERT INTO records({columns}) SELECT {columns}"
+                " FROM records_legacy_unique"
+            )
+            connection.execute("DROP TABLE records_legacy_unique")
+            connection.execute("DROP TABLE IF EXISTS records_fts")
 
     def _connect(self):
         self._check_path()
@@ -264,6 +350,7 @@ class SemanticMemory:
             connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=FULL")
             connection.executescript(self._SCHEMA)
+            self._migrate_schema(connection)
             self._ensure_fts(connection)
         except sqlite3.Error as error:
             try:
@@ -535,13 +622,35 @@ class SemanticMemory:
             connection.close()
         return [list(vectors[text]) for text in clean_texts]
 
-    def remember(self, texts, client, model, source=""):
+    def _validate_kind(self, kind):
+        if not isinstance(kind, str) or kind not in _MEMORY_KINDS:
+            raise ValueError(
+                "kind must be one of: " + ", ".join(_MEMORY_KINDS)
+            )
+        return kind
+
+    def _validate_importance(self, importance):
+        if type(importance) is not int or not 1 <= importance <= 10:
+            raise ValueError("importance must be an integer between 1 and 10")
+        return importance
+
+    def remember(
+        self,
+        texts,
+        client,
+        model,
+        source="",
+        kind="semantic",
+        importance=5,
+    ):
         clean_texts = [
             self._redact(text)
             for text in self._validate_texts(texts, reject_sensitive=True)
         ]
         model = self._validate_model(model)
         source = self._validate_source(source)
+        kind = self._validate_kind(kind)
+        importance = self._validate_importance(importance)
         vectors = self.embed_texts(clean_texts, client, model)
         if not clean_texts:
             return 0
@@ -552,8 +661,9 @@ class SemanticMemory:
             for text, vector in zip(clean_texts, vectors, strict=True):
                 cursor = connection.execute(
                     "INSERT OR IGNORE INTO records"
-                    " (hash, model, dimension, embedding, text, source, created_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    " (hash, model, dimension, embedding, text, source, created_at,"
+                    "  kind, importance)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         self._hash(text),
                         model,
@@ -562,14 +672,25 @@ class SemanticMemory:
                         text,
                         source,
                         now,
+                        kind,
+                        importance,
                     ),
                 )
-                if cursor.rowcount > 0 and self._fts_enabled:
-                    connection.execute(
-                        "INSERT INTO records_fts(rowid, text) VALUES (?, ?)",
-                        (cursor.lastrowid, text),
-                    )
+                if cursor.rowcount > 0:
                     added += 1
+                    if self._fts_enabled:
+                        connection.execute(
+                            "INSERT INTO records_fts(rowid, text) VALUES (?, ?)",
+                            (cursor.lastrowid, text),
+                        )
+                else:
+                    # dedup فوري: محتوى متطابق أعاد إحياء الذاكرة القديمة بدل
+                    # إسقاطها؛ لكي لا يتقادم ما يكرره المستخدم.
+                    connection.execute(
+                        "UPDATE records SET created_at = ?, last_accessed = ?"
+                        " WHERE hash = ? AND model = ? AND kind = ?",
+                        (now, now, self._hash(text), model, kind),
+                    )
             self._prune(connection)
             self._commit(connection)
         finally:
@@ -589,7 +710,8 @@ class SemanticMemory:
         connection = self._connect()
         try:
             row = connection.execute(
-                "SELECT id, superseded_by FROM records WHERE id = ? AND model = ?",
+                "SELECT id, superseded_by, kind, importance, pinned"
+                " FROM records WHERE id = ? AND model = ?",
                 (record_id, model),
             ).fetchone()
             if row is None:
@@ -598,8 +720,9 @@ class SemanticMemory:
                 raise ValueError("Record was already superseded")
             cursor = connection.execute(
                 "INSERT INTO records"
-                " (hash, model, dimension, embedding, text, source, created_at, supersedes)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " (hash, model, dimension, embedding, text, source, created_at,"
+                " supersedes, kind, importance, pinned)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     self._hash(clean_text),
                     model,
@@ -609,6 +732,9 @@ class SemanticMemory:
                     source,
                     time.time(),
                     record_id,
+                    row[2],
+                    row[3],
+                    row[4],
                 ),
             )
             new_id = cursor.lastrowid
@@ -635,7 +761,9 @@ class SemanticMemory:
         connection = self._connect()
         try:
             row = connection.execute(
-                "SELECT id, text, source, created_at, supersedes, superseded_by"
+                "SELECT id, text, source, created_at, supersedes, superseded_by,"
+                " kind, importance, feedback, access_count, last_accessed,"
+                " success_count, failure_count, pinned, archived"
                 " FROM records WHERE id = ? AND model = ?",
                 (record_id, model),
             ).fetchone()
@@ -650,13 +778,151 @@ class SemanticMemory:
             "created_at": row[3],
             "supersedes": row[4],
             "superseded_by": row[5],
+            "kind": row[6],
+            "importance": row[7],
+            "feedback": row[8],
+            "access_count": row[9],
+            "last_accessed": row[10],
+            "success_count": row[11],
+            "failure_count": row[12],
+            "pinned": bool(row[13]),
+            "archived": bool(row[14]),
         }
+
+    def reinforce(self, record_id):
+        """Strengthen one memory only after a verified successful reuse."""
+        if type(record_id) is not int or record_id < 1:
+            raise ValueError("record_id must be a positive integer")
+        connection = self._connect()
+        try:
+            cursor = connection.execute(
+                "UPDATE records SET success_count=success_count+1,"
+                " feedback=MIN(1.0, feedback+0.1),"
+                " importance=MIN(10, importance+1), last_accessed=? WHERE id=?",
+                (time.time(), record_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Record was not found")
+            self._commit(connection)
+        finally:
+            connection.close()
+
+    def penalize(self, record_id):
+        """Keep failure provenance while reducing a misleading memory's weight."""
+        if type(record_id) is not int or record_id < 1:
+            raise ValueError("record_id must be a positive integer")
+        connection = self._connect()
+        try:
+            cursor = connection.execute(
+                "UPDATE records SET failure_count=failure_count+1,"
+                " feedback=MAX(0.0, feedback-0.2),"
+                " importance=MAX(1, importance-1), last_accessed=? WHERE id=?",
+                (time.time(), record_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Record was not found")
+            self._commit(connection)
+        finally:
+            connection.close()
+
+    def set_pinned(self, record_id, pinned):
+        if type(record_id) is not int or record_id < 1 or type(pinned) is not bool:
+            raise ValueError("Invalid memory pin request")
+        self._set_record_flag(record_id, "pinned", pinned)
+
+    def set_archived(self, record_id, archived):
+        if type(record_id) is not int or record_id < 1 or type(archived) is not bool:
+            raise ValueError("Invalid memory archive request")
+        self._set_record_flag(record_id, "archived", archived)
+
+    def _set_record_flag(self, record_id, column, value):
+        connection = self._connect()
+        try:
+            cursor = connection.execute(
+                f"UPDATE records SET {column}=? WHERE id=?",
+                (int(value), record_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Record was not found")
+            self._commit(connection)
+        finally:
+            connection.close()
+
+    def forget(self, record_id):
+        if type(record_id) is not int or record_id < 1:
+            raise ValueError("record_id must be a positive integer")
+        connection = self._connect()
+        try:
+            cursor = connection.execute("DELETE FROM records WHERE id=?", (record_id,))
+            if cursor.rowcount != 1:
+                raise ValueError("Record was not found")
+            connection.execute(
+                "UPDATE records SET supersedes=NULL, superseded_by=NULL"
+                " WHERE supersedes=? OR superseded_by=?",
+                (record_id, record_id),
+            )
+            self._sync_fts(connection)
+            self._commit(connection)
+        finally:
+            connection.close()
+
+    def forget_source(self, source):
+        source = self._validate_source(source)
+        if not source:
+            raise ValueError("source is required")
+        connection = self._connect()
+        try:
+            connection.execute("PRAGMA secure_delete=ON")
+            hashes = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT DISTINCT hash FROM records WHERE source=?", (source,)
+                )
+            ]
+            connection.execute("DELETE FROM records WHERE source=?", (source,))
+            if hashes:
+                placeholders = ",".join("?" for _ in hashes)
+                connection.execute(
+                    f"DELETE FROM cache WHERE hash IN ({placeholders})", hashes
+                )
+            self._sync_fts(connection)
+            self._commit(connection)
+            connection.execute("VACUUM")
+        finally:
+            connection.close()
+
+    def consolidate(self):
+        """Archive exact normalized duplicates while retaining their source rows."""
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT id, text FROM records WHERE superseded_by IS NULL"
+                " AND archived=0 ORDER BY pinned DESC, importance DESC, created_at DESC"
+            ).fetchall()
+            canonical = {}
+            consolidated = 0
+            for record_id, text in rows:
+                key = " ".join(text.casefold().split())
+                if key not in canonical:
+                    canonical[key] = record_id
+                    continue
+                connection.execute(
+                    "UPDATE records SET archived=1, superseded_by=? WHERE id=?",
+                    (canonical[key], record_id),
+                )
+                consolidated += 1
+            if consolidated:
+                self._sync_fts(connection)
+                self._commit(connection)
+            return consolidated
+        finally:
+            connection.close()
 
     def _prune(self, connection):
         """Keep record/cache counts and the content byte budget bounded."""
         connection.execute(
             "DELETE FROM records WHERE id NOT IN ("
-            " SELECT id FROM records ORDER BY id DESC LIMIT ?)",
+            " SELECT id FROM records ORDER BY pinned DESC, id DESC LIMIT ?)",
             (self.max_records,),
         )
         connection.execute(
@@ -697,7 +963,7 @@ class SemanticMemory:
                 )
                 continue
             record_oldest = connection.execute(
-                "SELECT id FROM records ORDER BY id LIMIT 1"
+                "SELECT id FROM records ORDER BY pinned, id LIMIT 1"
             ).fetchone()
             if not record_oldest:
                 raise RuntimeError("Semantic memory exceeds its size limit")
@@ -757,7 +1023,9 @@ class SemanticMemory:
         try:
             rows = connection.execute(
                 "SELECT id, dimension, embedding, text, source, created_at,"
-                " supersedes, superseded_by FROM records WHERE model = ?",
+                " supersedes, superseded_by, kind, importance, feedback,"
+                " access_count, last_accessed, success_count, failure_count,"
+                " pinned, archived FROM records WHERE model = ?",
                 (model,),
             ).fetchall()
             fts_ranks = {}
@@ -779,7 +1047,7 @@ class SemanticMemory:
                     self._fts_enabled = False
         finally:
             connection.close()
-        active = [row for row in rows if row[7] is None]
+        active = [row for row in rows if row[7] is None and not row[16]]
         if not active:
             return []
         active_by_id = {row[0]: row for row in active}
@@ -797,6 +1065,7 @@ class SemanticMemory:
 
         def entry(record, score, cosine):
             return {
+                "id": record[0],
                 "text": record[3],
                 "metadata": {
                     "hash": self._hash(record[3]),
@@ -805,10 +1074,38 @@ class SemanticMemory:
                     "source": record[4],
                     "created_at": record[5],
                     "supersedes": record[6],
+                    "kind": record[8],
+                    "importance": record[9],
+                    "access_count": record[11],
+                    "success_count": record[13],
+                    "failure_count": record[14],
+                    "pinned": bool(record[15]),
                 },
                 "score": score,
                 "cosine": cosine,
             }
+
+        now = time.time()
+
+        def decay_factor(record):
+            """تلاشي أسي بنصف عمر يعتمد على النوع ويتمد بالأهمية."""
+            if record[15]:
+                return 1.0
+            age_days = max(
+                0.0, (now - (record[12] or record[5])) / 86400
+            )
+            half_life = _KIND_HALF_LIFE_DAYS.get(record[8], 90) * max(
+                0.25, 1 + _IMPORTANCE_WEIGHT * (record[9] - 5)
+            )
+            factor = 0.5 ** (age_days / max(half_life, 0.5))
+            return max(_DECAY_FLOOR, factor)
+
+        def relevance_multiplier(record):
+            # محايد عند الافتراضيات: feedback=0.5 → 1.0، ويتحرك ضمن
+            # [0.75, 1.25] حسب إعجاب الاسترجاع السابق بالذاكرة.
+            return (1 + (record[9] - 5) * _IMPORTANCE_SLOPE) * (
+                1 + (record[10] - _FEEDBACK_MIN) * 0.5
+            )
 
         fused = {}
         # تسوية RRF إلى مقياس 0..1: أعلى رتبة في كل ساق = 1.0، فتبقى عتبات
@@ -827,7 +1124,75 @@ class SemanticMemory:
                 fused[record_id]["score"] += fused_score(fts_rank)
             elif record_id in active_by_id:
                 fused[record_id] = entry(active_by_id[record_id], fused_score(fts_rank), 0.0)
+        for record_id, item in fused.items():
+            record = active_by_id[record_id]
+            item["score"] = min(
+                item["score"]
+                * decay_factor(record)
+                * relevance_multiplier(record),
+                2.0,
+            )
         ranked = sorted(fused.values(), key=lambda item: item["score"], reverse=True)
         for item in ranked:
-            item["score"] = round(min(item["score"], 2.0), 6)
-        return ranked[:limit]
+            item["score"] = round(item["score"], 6)
+
+        # عدّاد الوصول ووزن التغذية الراجعة يتحدثان للذاكرات المعادة فعلًا.
+        returned = ranked[:limit]
+        if returned:
+            connection = self._connect()
+            try:
+                for item in returned:
+                    connection.execute(
+                        "UPDATE records SET"
+                        " access_count = access_count + 1,"
+                        " last_accessed = ?,"
+                        " feedback = MIN(1.0, feedback + (1.0 - feedback) * ?)"
+                        " WHERE id = ?",
+                        (now, _FEEDBACK_STEP, item["id"]),
+                    )
+                self._commit(connection)
+            finally:
+                connection.close()
+        return returned
+
+    def keyword_search(self, query, limit=5):
+        """FTS-only fallback used when the local embedding provider is unavailable."""
+        query = self._validate_texts([query])[0]
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        fts_query = self._fts_query(query)
+        if not fts_query:
+            return []
+        connection = self._connect()
+        try:
+            if not self._fts_enabled:
+                return []
+            rows = connection.execute(
+                "SELECT r.id, r.text, r.source, r.created_at, r.kind,"
+                " r.importance, r.access_count"
+                " FROM records_fts f JOIN records r ON r.id = f.rowid"
+                " WHERE records_fts MATCH ? AND r.superseded_by IS NULL"
+                " AND r.archived=0"
+                " ORDER BY bm25(records_fts) LIMIT ?",
+                (fts_query, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        finally:
+            connection.close()
+        return [
+            {
+                "id": row[0],
+                "text": row[1],
+                "metadata": {
+                    "source": row[2],
+                    "created_at": row[3],
+                    "kind": row[4],
+                    "importance": row[5],
+                    "access_count": row[6],
+                },
+                "score": 1.0 / rank,
+                "cosine": 0.0,
+            }
+            for rank, row in enumerate(rows, start=1)
+        ]

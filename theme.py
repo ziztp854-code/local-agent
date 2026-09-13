@@ -39,10 +39,9 @@ def ui_font(size=10, weight="normal"):
 
 
 def display_font(size=22, weight="bold"):
-    # عناوين بأسلوب الطرفية: monospace يعطي طابع TUI حتى في النوافذ.
     if weight == "normal":
-        return (MONO_FONT_FAMILY, size)
-    return (MONO_FONT_FAMILY, size, weight)
+        return (DISPLAY_FONT_FAMILY, size)
+    return (DISPLAY_FONT_FAMILY, size, weight)
 
 
 def mono_font(size=10, weight="normal"):
@@ -151,29 +150,27 @@ COLORS = {
     "secondary_bg": "#E6EEEB",
 }
 
-# هوية «طرفية OpenCode»: أسود محايد رمادي (ليس مخضرًّا) مع لمسة برتقالية واحدة،
-# حواف شبه حادة وطبقة mono للتفاصيل — إحساس TUI داخل نافذة سطح مكتب.
-# سلّم عمق محايد: fog (رئيسية) < secondary_bg < surface (بطاقات) < chip/elevated.
+# لوحة داكنة مستمدة من محطة تشغيل محلية: كحلي عميق مع زمردي واضح للحالة والفعل.
 DARK_COLORS = {
-    "ink": "#EDEDEE",       # نص رئيسي فاتح محايد
-    "fog": "#0A0A0A",       # خلفية رئيسية شبه سوداء
-    "surface": "#141414",   # خلفية البطاقات
-    "muted": "#8A8A8A",     # نص ثانوي رمادي
-    "teal": "#FF8F40",      # اللون الأساسي (برتقالي OpenCode)
-    "copper": "#FFC878",    # تحذير/إبراز ثانوي
-    "danger": "#FF6B6B",    # خطأ
-    "line": "#262626",      # حدود خفيفة محايدة
-    "soft_teal": "#1D1611",  # خلفية أساسية ناعمة (فقاعة المستخدم/النشط) بدفء برتقالي
-    "soft_copper": "#211B10",
+    "ink": "#F2F8F7",
+    "fog": "#031114",
+    "surface": "#07191D",
+    "muted": "#8EA7AB",
+    "teal": "#12E3B0",
+    "copper": "#FFD45E",
+    "danger": "#FF6B7A",
+    "line": "#164048",
+    "soft_teal": "#07342D",
+    "soft_copper": "#2B2714",
     "soft_danger": "#2A1418",
-    "focus": "#FFA35C",     # الأساسي عند التحويم/حلقة التركيز
-    "band_bg": "#0F0F0F",   # خلفية ثانوية (شريط الحالة)
-    "band_fg": "#EDEDEE",
-    "chip": "#1B1B1B",      # خلفية مرتفعة (الرقائق)
-    "chip_fg": "#D4D4D4",
-    "success": "#4AD98F",
-    "warning": "#FFC878",
-    "info": "#6FA8FF",
-    "elevated": "#1B1B1B",
-    "secondary_bg": "#0F0F0F",
+    "focus": "#58F7D1",
+    "band_bg": "#081E23",
+    "band_fg": "#F2F8F7",
+    "chip": "#10272D",
+    "chip_fg": "#DDEBE9",
+    "success": "#19E6A8",
+    "warning": "#FFD45E",
+    "info": "#59C7FF",
+    "elevated": "#133139",
+    "secondary_bg": "#091F24",
 }
