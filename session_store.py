@@ -31,6 +31,7 @@ class SessionStore:
             raise ValueError("Session limits must be positive integers")
         self.max_bytes = max_bytes
         self.max_messages = max_messages
+        self.name = name
         if state_root is None:
             platform_state = os.getenv("LOCALAPPDATA") or os.getenv("XDG_STATE_HOME")
             state_root = (
@@ -104,3 +105,10 @@ class SessionStore:
             if temporary and temporary.exists():
                 temporary.unlink()
 
+    def clear(self):
+        if self.path.parent.exists() and self._is_reparse(self.path.parent):
+            raise ToolError("مسار الجلسة غير آمن")
+        if self.path.exists():
+            if self._is_reparse(self.path):
+                raise ToolError("مسار الجلسة غير آمن")
+            self.path.unlink()

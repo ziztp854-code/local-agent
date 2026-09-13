@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from mcp_client import MCPApprovalDenied, MCPError, MCPRegistry
+from cognitive_memory import LocalCognitiveMemoryEngine
 from self_learning import SelfLearner
 from semantic_memory import SemanticMemory
 from session_store import SessionStore
@@ -379,6 +380,7 @@ class LocalAgent:
         memory=None,
         skill_catalog=None,
         learner=None,
+        cognitive_memory=None,
     ):
         if any(
             type(value) is not int or value < 1
@@ -398,6 +400,9 @@ class LocalAgent:
         self.memory = memory
         self.skill_catalog = skill_catalog
         self.learner = learner
+        self.cognitive_memory = cognitive_memory
+        self._active_experience_id = None
+        self._active_checkpoint_id = None
         self._archive = []
         system_prompt = CODING_SYSTEM_PROMPT if getattr(workspace, "coding", False) else SYSTEM_PROMPT
         saved_history = session.load() if session else []
@@ -593,6 +598,26 @@ class LocalAgent:
         yield from self._answer_events(prompt, image_paths, stream=True)
 
     def _answer_events(self, prompt, image_paths, *, stream):
+        if self.cognitive_memory is not None:
+            try:
+                self._active_experience_id = self.cognitive_memory.start_experience(prompt)
+            except (RuntimeError, ValueError, TypeError, AttributeError):
+                self._active_experience_id = None
+            if self._active_experience_id:
+                try:
+                    create_checkpoint = getattr(
+                        self.cognitive_memory, "create_checkpoint", None
+                    )
+                    if callable(create_checkpoint):
+                        self._active_checkpoint_id = (
+                            f"experience-{self._active_experience_id}"
+                        )
+                        create_checkpoint(
+                            self._active_checkpoint_id,
+                            ["execute", "verify", "finalize"],
+                        )
+                except (RuntimeError, ValueError, TypeError, AttributeError):
+                    self._active_checkpoint_id = None
         wire_user_message, stored_user_message = build_user_message(prompt, image_paths)
         context_note = self._context_note()
         recall_note = self._recall_note(prompt)
@@ -604,8 +629,8 @@ class LocalAgent:
         messages = [
             self.history[0],
             *( [{"role": "system", "content": context_note}] if context_note else [] ),
-            *( [{"role": "system", "content": learned_note}] if learned_note else [] ),
-            *( [{"role": "system", "content": recall_note}] if recall_note else [] ),
+            *( [{"role": "user", "content": learned_note}] if learned_note else [] ),
+            *( [{"role": "user", "content": recall_note}] if recall_note else [] ),
             *self.history[1:],
             wire_user_message,
         ]
@@ -762,6 +787,9 @@ class LocalAgent:
                         {"role": "tool", "tool_call_id": call_id, "content": content},
                     ]
                     continue
+                result = None
+                tool_error = ""
+                arguments = {}
                 try:
                     arguments = json.loads(raw_arguments or "{}")
                     if name in mcp_names:
@@ -808,11 +836,55 @@ class LocalAgent:
                     ValueError,
                     json.JSONDecodeError,
                 ) as error:
+                    tool_error = str(error)
                     content = (
                         f"خطأ: {error}\n"
                         "راجع الوسائط وأعد المحاولة مرة واحدة بمحاولة مصححة؛ "
                         "إن تكرر الخطأ فغيّر الطريقة أو اشرح السبب للمستخدم."
                     )
+                if (
+                    name == "run_command"
+                    and isinstance(result, dict)
+                    and type(result.get("exit_code")) is int
+                    and result["exit_code"] != 0
+                ):
+                    content = (
+                        f"خطأ: انتهى الأمر بكود {result['exit_code']}.\n{content}"
+                    )
+                if self.cognitive_memory is not None and self._active_experience_id:
+                    try:
+                        attempt = self.cognitive_memory.record_tool_result(
+                            self._active_experience_id,
+                            name,
+                            arguments if isinstance(arguments, dict) else {},
+                            result,
+                            error=tool_error,
+                        )
+                        update_checkpoint = getattr(
+                            self.cognitive_memory, "update_checkpoint", None
+                        )
+                        if callable(update_checkpoint) and self._active_checkpoint_id:
+                            outcome = attempt.get("outcome", "unknown")
+                            summary = {
+                                "tool": name,
+                                "outcome": outcome,
+                                "verified": bool(attempt.get("verified")),
+                            }
+                            update_checkpoint(
+                                self._active_checkpoint_id,
+                                completed=["execute"],
+                                remaining=["verify", "finalize"],
+                                tool_output=summary,
+                                **(
+                                    {"last_success": summary}
+                                    if outcome == "success"
+                                    else {"last_failure": summary}
+                                    if outcome == "failure"
+                                    else {}
+                                ),
+                            )
+                    except (RuntimeError, ValueError, TypeError, AttributeError):
+                        pass
                 status = "error" if content.startswith("خطأ:") else "ok"
                 if status == "error":
                     failed_signatures.add(signature)
@@ -900,16 +972,36 @@ class LocalAgent:
                     [f"المستخدم: {prompt}", f"الوكيل: {answer}"],
                     self.client,
                     self.embed_model,
+                    source=(
+                        f"session:{self.session.name}"
+                        if self.session is not None
+                        and isinstance(getattr(self.session, "name", None), str)
+                        else ""
+                    ),
+                    kind="conversation",
                 )
             except (RuntimeError, ValueError):
                 pass  # Memory is optional and must not suppress a completed answer.
-        if self.learner is not None:
+        if self.learner is not None and self.cognitive_memory is None:
             try:
                 self.learner.learn(
                     prompt, answer, self.client, self.model, self.embed_model
                 )
             except (RuntimeError, ValueError):
                 pass  # التعلم أفضل جهد ولا يجوز أن يعطّل ردًا اكتمل.
+        if self.cognitive_memory is not None and self._active_experience_id:
+            try:
+                self.cognitive_memory.finish_experience(self._active_experience_id)
+                complete_checkpoint = getattr(
+                    self.cognitive_memory, "complete_checkpoint", None
+                )
+                if callable(complete_checkpoint) and self._active_checkpoint_id:
+                    complete_checkpoint(self._active_checkpoint_id)
+            except (RuntimeError, ValueError, TypeError, AttributeError):
+                pass
+            finally:
+                self._active_experience_id = None
+                self._active_checkpoint_id = None
         if session_warning:
             yield {"type": "token", "delta": session_warning}
 
@@ -972,6 +1064,29 @@ def _build_learner(workspace_root):
         return None
 
 
+def _build_cognitive_memory(workspace_root, client, embed_model):
+    def enabled(name):
+        return os.getenv(name, "1").strip().casefold() not in {
+            "0", "false", "off", "no"
+        }
+
+    if not enabled("LOCAL_AGENT_COGNITIVE_MEMORY"):
+        return None
+    try:
+        return LocalCognitiveMemoryEngine.for_workspace(
+            workspace_root,
+            client,
+            embed_model,
+            experience_learning=enabled("LOCAL_AGENT_EXPERIENCE_LEARNING"),
+            reflection=enabled("LOCAL_AGENT_REFLECTION"),
+            skill_learning=enabled("LOCAL_AGENT_SKILL_LEARNING"),
+            knowledge_graph=enabled("LOCAL_AGENT_KNOWLEDGE_GRAPH"),
+            memory_consolidation=enabled("LOCAL_AGENT_MEMORY_CONSOLIDATION"),
+        )
+    except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
+        return None
+
+
 def configure_output_encoding():
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -1020,6 +1135,9 @@ def main(argv=None):
             else None
         )
         session = SessionStore(workspace.root, args.session) if args.session else None
+        cognitive_memory = _build_cognitive_memory(
+            workspace.root, client, args.embedding_model
+        )
         agent = LocalAgent(
             client,
             workspace,
@@ -1036,7 +1154,12 @@ def main(argv=None):
                 if args.semantic_memory
                 else None
             ),
-            learner=_build_learner(workspace.root),
+            learner=(
+                SelfLearner(cognitive_memory.memory)
+                if cognitive_memory is not None
+                else _build_learner(workspace.root)
+            ),
+            cognitive_memory=cognitive_memory,
         )
         if args.prompt is not None:
             print(safe_terminal_text(agent.answer(args.prompt, args.image)))

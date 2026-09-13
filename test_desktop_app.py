@@ -169,6 +169,7 @@ class DesktopConfigTests(unittest.TestCase):
             workspace = Mock(root=Path(temp_dir))
             session = object()
             embedding_cache = object()
+            cognitive_memory = Mock(memory=object())
             skill_catalog = object()
             built = object()
             with (
@@ -177,6 +178,10 @@ class DesktopConfigTests(unittest.TestCase):
                 patch("desktop_core.SemanticMemory") as memory_class,
                 patch("desktop_core.WorkspaceTools", return_value=workspace) as tools_class,
                 patch("desktop_core.SessionStore", return_value=session) as session_class,
+                patch(
+                    "desktop_core.LocalCognitiveMemoryEngine.for_workspace",
+                    return_value=cognitive_memory,
+                ),
                 patch(
                     "desktop_core.SkillCatalog.default", return_value=skill_catalog
                 ),
@@ -204,6 +209,7 @@ class DesktopConfigTests(unittest.TestCase):
                 memory=None,
                 skill_catalog=skill_catalog,
                 learner=ANY,
+                cognitive_memory=cognitive_memory,
             )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -236,6 +242,7 @@ class DesktopConfigTests(unittest.TestCase):
             session = Mock(path=Path(temp_dir, "session.json"))
             registry = object()
             conversation_memory = object()
+            cognitive_memory = Mock(memory=object())
             skill_catalog = object()
             built = object()
             with (
@@ -244,6 +251,10 @@ class DesktopConfigTests(unittest.TestCase):
                 patch("desktop_core.WorkspaceTools", return_value=workspace),
                 patch("desktop_core.SessionStore", return_value=session),
                 patch("desktop_core.MCPRegistry", return_value=registry) as registry_class,
+                patch(
+                    "desktop_core.LocalCognitiveMemoryEngine.for_workspace",
+                    return_value=cognitive_memory,
+                ),
                 patch(
                     "desktop_core.SkillCatalog.default", return_value=skill_catalog
                 ),
@@ -265,6 +276,7 @@ class DesktopConfigTests(unittest.TestCase):
                 memory=conversation_memory,
                 skill_catalog=skill_catalog,
                 learner=ANY,
+                cognitive_memory=cognitive_memory,
             )
 
     def test_missing_skills_pack_does_not_disable_the_agent(self):
@@ -908,7 +920,10 @@ class DesktopUiTests(unittest.TestCase):
             self.assertEqual(app.skill_panel.count, 1)
             tabs = [app.notebook.tab(tab, "text") for tab in app.notebook.tabs()]
             labels = [tab.split("  ")[0] for tab in tabs]  # النص قبل الأيقونة
-            self.assertEqual(labels, ["التكاملات", "المهارات", "التغييرات", "المحادثة"])
+            self.assertEqual(
+                labels,
+                ["التكاملات", "الذاكرة", "المهارات", "التغييرات", "المحادثة"],
+            )
             self.assertEqual(app.notebook.select(), str(app.chat_page))
             self.assertIn("المهارات: 1", app.skills_badge_var.get())
 
@@ -916,6 +931,55 @@ class DesktopUiTests(unittest.TestCase):
             self.assertEqual(app.send_button.cget("text"), "…")
             app._set_busy(False)
             self.assertEqual(app.send_button.cget("text"), "↑")
+
+            self.root.update_idletasks()
+            content = app.integrations_canvas.bbox("all")
+            self.assertIsNotNone(content)
+            self.assertGreater(content[3], 400)
+            self.assertEqual(str(app.integrations_scrollbar.cget("orient")), "vertical")
+
+    def test_memory_dashboard_uses_live_engine_data(self):
+        controller = self.FakeController()
+        engine = Mock(workspace=Path("C:/Projects/demo"))
+        engine.stats.return_value = {
+            "memories": 4,
+            "verified_successes": 3,
+            "verified_failures": 1,
+            "learned_skills": 2,
+        }
+        engine.list_memories.return_value = [{
+            "id": 9,
+            "text": "أمر البناء python -m pytest",
+            "kind": "project",
+            "importance": 8,
+            "pinned": False,
+            "archived": False,
+        }]
+        engine.list_experiences.return_value = [{
+            "status": "success",
+            "task": "تشغيل الاختبارات",
+            "lesson": "نجح الأمر",
+            "confidence": 0.95,
+        }]
+        engine.list_learned_skills.return_value = [{
+            "id": 3,
+            "name": "run-tests",
+            "version": 1,
+            "status": "candidate",
+            "enabled": True,
+            "success_count": 2,
+            "failure_count": 0,
+            "last_used_at": None,
+        }]
+        controller.agent = Mock(cognitive_memory=engine)
+        app = LocalAgentApp(self.root, controller=controller)
+
+        self.assertTrue(app.memory_panel.refresh())
+        self.assertEqual(app.memory_panel.stat_vars["memories"].get(), "4")
+        self.assertEqual(len(app.memory_panel.memory_tree.get_children()), 1)
+        app.memory_panel.memory_tree.selection_set("9")
+        app.memory_panel.toggle_pin()
+        engine.pin.assert_called_once_with(9)
 
     def test_app_handles_invalid_config_events_approval_and_close(self):
         controller = self.FakeController()
@@ -1151,6 +1215,13 @@ class DesktopUiTests(unittest.TestCase):
         app = LocalAgentApp(self.root, controller=self.FakeController())
         self.assertIn("Ctrl+K", app.footer_hint.cget("text"))
         self.assertEqual(app.status_dot.cget("text"), "●")
+        self.assertEqual(len(app.starter_cards), 4)
+        self.assertTrue(app.navigation_panel.winfo_exists())
+        self.assertTrue(app.privacy_card.winfo_exists())
+        app._navigation_buttons[2].invoke()
+        self.assertEqual(app.notebook.select(), str(app.skills_page))
+        app.permissions_button.invoke()
+        self.assertEqual(app.notebook.select(), str(app.integrations_page))
         self.assertIn("hand2", str(app.apply_button.cget("cursor")))
         self.assertIn("hand2", str(app.send_button.cget("cursor")))
 
