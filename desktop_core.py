@@ -20,6 +20,7 @@ from agent import (
     DEFAULT_MODEL,
     LMStudioClient,
     LocalAgent,
+    resolve_model_harness,
 )
 from cognitive_memory import LocalCognitiveMemoryEngine
 from delegation import (
@@ -106,6 +107,7 @@ class AppSettings:
         "session": lambda value: isinstance(value, str) and len(value) <= 128,
         "model": lambda value: isinstance(value, str) and len(value) <= 128,
         "base_url": lambda value: isinstance(value, str) and len(value) <= 512,
+        "harness": lambda value: value in {"standard", "deepseek"},
         "delegation_enabled": lambda value: type(value) is bool,
         "memory_enabled": lambda value: type(value) is bool,
         "experience_learning_enabled": lambda value: type(value) is bool,
@@ -656,6 +658,7 @@ class DesktopConfig:
     session: str = ""
     model: str = DEFAULT_MODEL
     base_url: str = DEFAULT_BASE_URL
+    harness: str = "standard"
     mcp_config: Path | None = None
     semantic_memory: bool = False
     mcp_fingerprint: str = ""
@@ -675,6 +678,7 @@ class DesktopConfig:
         session="",
         model=DEFAULT_MODEL,
         base_url=DEFAULT_BASE_URL,
+        harness="standard",
         mcp_config="",
         semantic_memory=False,
         container_engine="",
@@ -701,6 +705,7 @@ class DesktopConfig:
             raise ValueError("اسم النموذج مطلوب")
         if not isinstance(base_url, str) or not base_url.strip():
             raise ValueError("عنوان LM Studio مطلوب")
+        harness_config = resolve_model_harness(harness)
         feature_flags = (
             semantic_memory,
             memory_enabled,
@@ -743,6 +748,7 @@ class DesktopConfig:
             session=clean_session,
             model=model.strip(),
             base_url=base_url.strip(),
+            harness=harness_config.name,
             mcp_config=config_path,
             semantic_memory=semantic_memory,
             mcp_fingerprint=config_fingerprint,
@@ -765,7 +771,12 @@ class DesktopConfig:
 
 
 def build_local_agent(config, approver):
-    client = LMStudioClient(config.base_url, api_key=os.getenv("LM_STUDIO_API_KEY"))
+    harness = resolve_model_harness(config.harness)
+    client = LMStudioClient(
+        config.base_url,
+        api_key=os.getenv("LM_STUDIO_API_KEY"),
+        temperature=harness.temperature,
+    )
     embedding_cache = SemanticMemory.for_workspace(config.workspace, "workspace")
     workspace = WorkspaceTools(
         config.workspace,
@@ -830,6 +841,7 @@ def build_local_agent(config, approver):
         skill_catalog=skill_catalog,
         learner=learner,
         cognitive_memory=cognitive_memory,
+        harness=harness.name,
     )
 
 

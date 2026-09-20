@@ -51,3 +51,31 @@ Scope: تطبيق Windows عربي محلي أولًا يدير دورة تنف�
 
 - [x] G10: تعرض المعاينة المرئية لوحة دورة المهمة بالعربية دون قص أو تجميد، مع وضوح بوابات التنفيذ والمراجعة والاختبارات
   EVIDENCE: فُحصت `dist\LocalAgent.exe` الفعلية عبر Computer Use؛ ظهرت لوحة المهام العربية بأربع مراحل واضحة (التنفيذ، المراجعة، الاختبارات، الاعتماد) دون قص أو تجميد، ثم أُغلقت النسخة التجريبية بنجاح.
+
+## إضافة DeepSeek Harness
+
+- [x] G11: يطبّق ملف DeepSeek تعليمات الأدوات وإعداد التوليد المخصص، ويرفض أي معرّف Harness غير معروف
+  CHECK: python -m unittest -v test_agent.ModelHarnessTests
+  EXPECT: OK
+  EVIDENCE: exit=0; نجح اختباران للتعليمات ودرجة الحرارة والتحقق من المعرّف.
+
+- [x] G12: يُحفظ اختيار DeepSeek من الواجهة ويمر عبر DesktopConfig إلى العميل والوكيل
+  CHECK: python -m unittest -v test_desktop_app.DesktopConfigTests test_desktop_app.DesktopUiTests
+  EXPECT: OK
+  EVIDENCE: exit=0; نجحت اختبارات الإعداد والواجهة، بما فيها حفظ DeepSeek واستعادته.
+
+- [x] G13: تمر مجموعة الاختبارات وفحوص الجودة كاملة بعد الإضافة
+  CHECK: python -m unittest && python -m ruff check . && python -m compileall -q -f . && echo DEEPSEEK_HARNESS_VERIFIED
+  EXPECT: DEEPSEEK_HARNESS_VERIFIED
+  EVIDENCE: exit=0; 232 اختبارًا OK؛ Ruff نجح؛ compileall اكتمل؛ تغطية التطبيق 80%.
+
+- [x] G14: تُعاد حزم نسخة Windows المستقلة لتتضمن الخيار الجديد
+  EVIDENCE: بُني `dist\LocalAgent.exe` بـ Python 3.12.10 وPyInstaller 6.21.0؛ اجتاز فحص تشغيل مخفي لمدة 5 ثوانٍ؛ الحجم 14,181,408 بايت؛ SHA256=`2FEC5BE41A3DF64455E39A2593ABFA70131FEBCCD878F25E6E162A2093983AAE`.
+
+- [x] G15: تُضمّن سياسة AGENTS_PROGRAMMING_ONLY وتُحمّل تلقائيًا فقط في وضعي البرمجة
+  CHECK: python -m unittest -v test_agent.ProgrammingInstructionsTests
+  EXPECT: OK
+  EVIDENCE: exit=0; نجح اختباران للتحميل الانتقائي ورفض الملف المفقود والكبير وغير UTF-8؛ كما تطابقت النسخة المضمنة مع الملف المرفق سطرًا بسطر.
+
+- [x] G16: تحتوي نسخة Windows على ملف السياسة وتبدأ دون خروج مبكر
+  EVIDENCE: أظهر PyInstaller archive `assets\AGENTS_PROGRAMMING_ONLY.md` بحجم 15,235 بايت؛ اجتاز الملف التنفيذي فحص تشغيل مخفي لمدة 5 ثوانٍ؛ الحجم 14,187,511 بايت؛ SHA256=`37C0DEF0E52A88F9283BA86B4CC9ADBD45DB14812EAE63A547A1C4833DC01C67`.

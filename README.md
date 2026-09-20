@@ -64,7 +64,7 @@ py -3.12 tools/make_icon.py
 py -3.12 -m PyInstaller --noconfirm --clean --onefile --windowed `
   --collect-all tkinterdnd2 --name LocalAgent --icon assets/app_icon.ico `
   --add-data "assets;assets" --distpath dist --workpath build `
-  --specpath build LocalAgent.pyw
+  --specpath . LocalAgent.pyw
 ```
 
 أيقونة التطبيق مولّدة بلا تبعيات من `tools/make_icon.py` (معيّن ◆ طيني-نحاسي على
@@ -81,6 +81,23 @@ lms server start --port 1234 --bind 127.0.0.1
 python agent.py --workspace "C:\Projects\my-project"
 ```
 
+## DeepSeek Harness
+
+يتضمن التطبيق ملف تهيئة محليًا لنماذج DeepSeek. حمّل نموذج DeepSeek المناسب
+في LM Studio، ثم اختره من قائمة **النموذج المحلي** واختر **DeepSeek** من
+**Harness النموذج**. يضبط هذا الملف العشوائية ويضيف تعليمات مخصصة لاستدعاء
+الأدوات دون إرسال البيانات إلى خادم خارجي.
+استخدم نسخة نموذج وقالب محادثة يدعمان tool calling؛ لأن ملف التهيئة لا
+يضيف هذه القدرة إلى نموذج لا يدعمها أصلًا.
+
+من سطر الأوامر:
+
+```powershell
+python agent.py --workspace "C:\Projects\my-project" --model "<LM Studio model id>" --harness deepseek
+```
+
+يبقى الوكيل محليًا فقط؛ لا يسمح DeepSeek Harness بالاتصال بواجهة DeepSeek السحابية.
+
 لطلب واحد:
 
 ```powershell
@@ -92,6 +109,11 @@ python agent.py --workspace "C:\Projects\my-project" --prompt "لخص المشر
 ```powershell
 python agent.py --workspace "C:\Projects\my-project" --coding --session my-project
 ```
+
+عند تفعيل وضع البرمجة، يحمّل الوكيل تلقائيًا سياسة
+[`assets/AGENTS_PROGRAMMING_ONLY.md`](assets/AGENTS_PROGRAMMING_ONLY.md) المضمنة مع التطبيق. تضيف
+قواعد فحص المشروع، والتعديل المحدود، والاختبار، والتحقق، والأمان. لا تُحمّل
+هذه السياسة في وضع القراءة.
 
 يضيف هذا الوضع:
 

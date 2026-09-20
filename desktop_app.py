@@ -48,6 +48,12 @@ MODE_LABELS = {
     "برمجة + أوامر المضيف": "host",
 }
 
+HARNESS_LABELS = {
+    "قياسي": "standard",
+    "DeepSeek": "deepseek",
+}
+HARNESS_NAMES = {value: label for label, value in HARNESS_LABELS.items()}
+
 QUICK_PROMPTS = (
     ("لخّص المشروع", "لخّص هذا المشروع واذكر أهم ملفاته ودور كل منها."),
     ("اقترح تحسينات", "اقرأ الكود واقترح تحسينات ملموسة مرتبة بالأولوية."),
@@ -145,6 +151,7 @@ class LocalAgentApp:
         self.mode_var = tk.StringVar(value="قراءة فقط")
         self.session_var = tk.StringVar()
         self.model_var = tk.StringVar(value=DEFAULT_MODEL)
+        self.harness_var = tk.StringVar(value="قياسي")
         self.base_url_var = tk.StringVar(value=DEFAULT_BASE_URL)
         self.mcp_config_var = tk.StringVar()
         self.semantic_memory_var = tk.BooleanVar(value=False)
@@ -174,6 +181,8 @@ class LocalAgentApp:
             self.session_var.set(saved["session"])
         if saved.get("model"):
             self.model_var.set(saved["model"])
+        if saved.get("harness") in HARNESS_NAMES:
+            self.harness_var.set(HARNESS_NAMES[saved["harness"]])
         if saved.get("base_url"):
             self.base_url_var.set(saved["base_url"])
         if saved.get("mode") in MODE_LABELS:
@@ -1276,6 +1285,25 @@ class LocalAgentApp:
             cursor="hand2",
         )
         self.refresh_models_button.pack(side="right", padx=(8, 0))
+        self._field_label(panel, "Harness النموذج")
+        self.harness_combo = ttk.Combobox(
+            panel,
+            textvariable=self.harness_var,
+            values=tuple(HARNESS_LABELS),
+            state="readonly",
+        )
+        self.harness_combo.pack(fill="x", pady=(0, 4), ipady=3)
+        self.harness_combo.bind(
+            "<<ComboboxSelected>>", lambda event: self._configuration_changed()
+        )
+        tk.Label(
+            panel,
+            text="اختر DeepSeek عند تشغيل نموذج DeepSeek محليًا عبر LM Studio.",
+            bg=COLORS["surface"],
+            fg=COLORS["muted"],
+            anchor="e",
+            justify="right",
+        ).pack(fill="x", pady=(0, 14))
         self._field_label(panel, "عنوان LM Studio")
         self.base_url_entry = self._entry(panel, self.base_url_var, justify="left")
         self._field_label(panel, "ملف إعداد MCP · اختياري")
@@ -1372,6 +1400,7 @@ class LocalAgentApp:
             self._selected_mode(),
             session=self.session_var.get(),
             model=self.model_var.get(),
+            harness=HARNESS_LABELS.get(self.harness_var.get(), ""),
             base_url=self.base_url_var.get(),
             mcp_config=self.mcp_config_var.get(),
             semantic_memory=self.semantic_memory_var.get(),
@@ -1542,6 +1571,7 @@ class LocalAgentApp:
             "mode": self.mode_var.get(),
             "session": self.session_var.get(),
             "model": self.model_var.get(),
+            "harness": HARNESS_LABELS.get(self.harness_var.get(), "standard"),
             "base_url": self.base_url_var.get(),
             "delegation_enabled": self.delegation_var.get(),
             "memory_enabled": self.memory_enabled_var.get(),
@@ -2087,13 +2117,14 @@ class LocalAgentApp:
             write_state = "الكتابة: معطلة"
         elif mode == "coding":
             color = self.colors["copper"]
-            note = "كل تعديل يعرض فرقًا ويطلب موافقة مستقلة."
+            note = "سياسة البرمجة نشطة؛ كل تعديل يعرض فرقًا ويطلب موافقة."
             badge = "الوضع: برمجة"
             write_state = "الكتابة: بموافقة"
         else:
             color = self.colors["danger"]
             note = (
-                "أوامر المضيف داخل حاوية معزولة عند اختيار Docker/Podman، وإلا فهي غير معزولة."
+                "سياسة البرمجة نشطة؛ أوامر المضيف معزولة مع Docker/Podman، "
+                "وإلا فهي غير معزولة."
             )
             badge = "الوضع: مضيف"
             write_state = "الأوامر: بموافقة"
