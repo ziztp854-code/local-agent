@@ -48,6 +48,12 @@ MODE_LABELS = {
     "برمجة + أوامر المضيف": "host",
 }
 
+HARNESS_LABELS = {
+    "قياسي": "standard",
+    "DeepSeek": "deepseek",
+}
+HARNESS_NAMES = {value: label for label, value in HARNESS_LABELS.items()}
+
 QUICK_PROMPTS = (
     ("لخّص المشروع", "لخّص هذا المشروع واذكر أهم ملفاته ودور كل منها."),
     ("اقترح تحسينات", "اقرأ الكود واقترح تحسينات ملموسة مرتبة بالأولوية."),
@@ -139,14 +145,17 @@ class LocalAgentApp:
         self._boot_thread = None
         self._models_results = Queue()
         self._models_thread = None
+        self._delegation_snapshot = None
 
         self.workspace_var = tk.StringVar(value=str(Path.cwd()))
         self.mode_var = tk.StringVar(value="قراءة فقط")
         self.session_var = tk.StringVar()
         self.model_var = tk.StringVar(value=DEFAULT_MODEL)
+        self.harness_var = tk.StringVar(value="قياسي")
         self.base_url_var = tk.StringVar(value=DEFAULT_BASE_URL)
         self.mcp_config_var = tk.StringVar()
         self.semantic_memory_var = tk.BooleanVar(value=False)
+        self.delegation_var = tk.BooleanVar(value=True)
         self.memory_enabled_var = tk.BooleanVar(value=True)
         self.experience_learning_var = tk.BooleanVar(value=True)
         self.reflection_var = tk.BooleanVar(value=True)
@@ -172,11 +181,15 @@ class LocalAgentApp:
             self.session_var.set(saved["session"])
         if saved.get("model"):
             self.model_var.set(saved["model"])
+        if saved.get("harness") in HARNESS_NAMES:
+            self.harness_var.set(HARNESS_NAMES[saved["harness"]])
         if saved.get("base_url"):
             self.base_url_var.set(saved["base_url"])
         if saved.get("mode") in MODE_LABELS:
             self.mode_var.set(saved["mode"])
         self._saved_dark_theme = bool(saved.get("dark_theme", True))
+        if "delegation_enabled" in saved:
+            self.delegation_var.set(saved["delegation_enabled"])
         for key, variable in (
             ("memory_enabled", self.memory_enabled_var),
             ("experience_learning_enabled", self.experience_learning_var),
@@ -609,6 +622,24 @@ class LocalAgentApp:
             wraplength=245,
         ).pack(fill="x", pady=(0, 14))
 
+        self.delegation_check = tk.Checkbutton(
+            parent,
+            text="مسار مفوّض: تنفيذ ← مراجعة ← اختبارات",
+            variable=self.delegation_var,
+            command=self._configuration_changed,
+            bg=COLORS["surface"],
+            fg=COLORS["ink"],
+            activebackground=COLORS["surface"],
+            anchor="e",
+            justify="right",
+        )
+        self.delegation_check.pack(fill="x", pady=(0, 14))
+        Tooltip(
+            self.delegation_check,
+            "ينشئ مراجعًا مستقلًا ويمنع الاعتماد حتى تنجح الفحوصات.",
+            self.colors,
+        )
+
         self._field_label(parent, "اسم الجلسة · اختياري (مثال: تحسين واجهة التطبيق)")
         self.session_entry = self._entry(parent, self.session_var)
         self.clear_session_button = tk.Button(
@@ -1039,10 +1070,63 @@ class LocalAgentApp:
                 cursor="hand2",
             ).pack(side="right", padx=(8, 0))
 
-        changes_page.grid_rowconfigure(1, weight=1)
+        changes_page.grid_rowconfigure(2, weight=1)
         changes_page.grid_columnconfigure(0, weight=1)
+
+        delegation_band = tk.Frame(
+            changes_page,
+            bg=COLORS["fog"],
+            padx=12,
+            pady=12,
+        )
+        delegation_band.grid(row=0, column=0, sticky="ew")
+        self.delegation_worker_var = tk.StringVar(value="بانتظار مهمة")
+        self.delegation_review_var = tk.StringVar(value="لم تبدأ المراجعة")
+        self.delegation_tests_var = tk.StringVar(value="لم تبدأ الاختبارات")
+        self.delegation_accept_var = tk.StringVar(value="الاعتماد مقفل")
+        for title, variable, marker in (
+            ("التنفيذ", self.delegation_worker_var, "01"),
+            ("المراجعة", self.delegation_review_var, "02"),
+            ("الاختبارات", self.delegation_tests_var, "03"),
+            ("الاعتماد", self.delegation_accept_var, "04"),
+        ):
+            card = tk.Frame(
+                delegation_band,
+                bg=COLORS["surface"],
+                highlightthickness=1,
+                highlightbackground=COLORS["line"],
+                padx=12,
+                pady=9,
+            )
+            card.pack(side="right", fill="x", expand=True, padx=4)
+            tk.Label(
+                card,
+                text=marker,
+                bg=COLORS["surface"],
+                fg=COLORS["copper"],
+                font=theme.mono_font(8),
+            ).pack(side="right", padx=(8, 0))
+            copy = tk.Frame(card, bg=COLORS["surface"])
+            copy.pack(side="right", fill="x", expand=True)
+            tk.Label(
+                copy,
+                text=title,
+                bg=COLORS["surface"],
+                fg=COLORS["ink"],
+                font=theme.ui_font(9, "bold"),
+                anchor="e",
+            ).pack(fill="x")
+            tk.Label(
+                copy,
+                textvariable=variable,
+                bg=COLORS["surface"],
+                fg=COLORS["muted"],
+                font=theme.ui_font(8),
+                anchor="e",
+            ).pack(fill="x")
+
         changes_header = tk.Frame(changes_page, bg=COLORS["surface"], padx=18, pady=14)
-        changes_header.grid(row=0, column=0, sticky="ew")
+        changes_header.grid(row=1, column=0, sticky="ew")
         tk.Label(
             changes_header,
             text="تعديلات هذه العملية",
@@ -1074,6 +1158,21 @@ class LocalAgentApp:
             cursor="hand2",
         )
         self.undo_button.pack(side="left", padx=(8, 0))
+        self.accept_task_button = tk.Button(
+            changes_header,
+            text="اعتماد النتيجة",
+            command=self.accept_delegated_task,
+            bg=COLORS["teal"],
+            fg="white",
+            activebackground=COLORS["focus"],
+            activeforeground="white",
+            relief="flat",
+            padx=14,
+            pady=7,
+            state="disabled",
+            cursor="hand2",
+        )
+        self.accept_task_button.pack(side="left", padx=(8, 0))
         self.changes_text = ScrolledText(
             changes_page,
             wrap="none",
@@ -1085,7 +1184,7 @@ class LocalAgentApp:
             padx=16,
             pady=16,
         )
-        self.changes_text.grid(row=1, column=0, sticky="nsew")
+        self.changes_text.grid(row=2, column=0, sticky="nsew")
         self.changes_text.bind("<Button-3>", lambda event: self._show_text_menu(event, self.changes_text))
         self.changes_text.tag_configure(
             "diff_add", foreground="#137333", background="#E6F4EA"
@@ -1186,6 +1285,25 @@ class LocalAgentApp:
             cursor="hand2",
         )
         self.refresh_models_button.pack(side="right", padx=(8, 0))
+        self._field_label(panel, "Harness النموذج")
+        self.harness_combo = ttk.Combobox(
+            panel,
+            textvariable=self.harness_var,
+            values=tuple(HARNESS_LABELS),
+            state="readonly",
+        )
+        self.harness_combo.pack(fill="x", pady=(0, 4), ipady=3)
+        self.harness_combo.bind(
+            "<<ComboboxSelected>>", lambda event: self._configuration_changed()
+        )
+        tk.Label(
+            panel,
+            text="اختر DeepSeek عند تشغيل نموذج DeepSeek محليًا عبر LM Studio.",
+            bg=COLORS["surface"],
+            fg=COLORS["muted"],
+            anchor="e",
+            justify="right",
+        ).pack(fill="x", pady=(0, 14))
         self._field_label(panel, "عنوان LM Studio")
         self.base_url_entry = self._entry(panel, self.base_url_var, justify="left")
         self._field_label(panel, "ملف إعداد MCP · اختياري")
@@ -1282,6 +1400,7 @@ class LocalAgentApp:
             self._selected_mode(),
             session=self.session_var.get(),
             model=self.model_var.get(),
+            harness=HARNESS_LABELS.get(self.harness_var.get(), ""),
             base_url=self.base_url_var.get(),
             mcp_config=self.mcp_config_var.get(),
             semantic_memory=self.semantic_memory_var.get(),
@@ -1452,7 +1571,9 @@ class LocalAgentApp:
             "mode": self.mode_var.get(),
             "session": self.session_var.get(),
             "model": self.model_var.get(),
+            "harness": HARNESS_LABELS.get(self.harness_var.get(), "standard"),
             "base_url": self.base_url_var.get(),
+            "delegation_enabled": self.delegation_var.get(),
             "memory_enabled": self.memory_enabled_var.get(),
             "experience_learning_enabled": self.experience_learning_var.get(),
             "reflection_enabled": self.reflection_var.get(),
@@ -1587,7 +1708,13 @@ class LocalAgentApp:
         if self._active_config != config and not self.apply_configuration():
             return False
         images = tuple(self.pending_images)
-        if not self.controller.submit(prompt, images):
+        delegated = self.delegation_var.get() and config.mode != "read"
+        submitter = (
+            getattr(self.controller, "submit_delegated", None)
+            if delegated
+            else self.controller.submit
+        )
+        if not callable(submitter) or not submitter(prompt, images):
             return False
         visible_prompt = prompt + (f"\n[صورة مرفقة: {len(images)}]" if images else "")
         self._append_chat("user", visible_prompt)
@@ -1598,7 +1725,10 @@ class LocalAgentApp:
         self._streaming_answer_open = False
         self._stream_result = "pending"
         self._set_busy(True)
-        self._set_status("الوكيل يعمل…", "copper")
+        self._set_status(
+            "بدأ مسار التنفيذ والمراجعة والاختبارات…" if delegated else "الوكيل يعمل…",
+            "copper",
+        )
         return True
 
     def _send_shortcut(self, _event=None):
@@ -1633,6 +1763,72 @@ class LocalAgentApp:
             changes = f"تعذر عرض التغييرات: {safe_terminal_text(error)}"
         self._set_diff_text(safe_terminal_text(changes))
         self.notebook.select(self.changes_page)
+
+    def _handle_delegation(self, snapshot):
+        if not isinstance(snapshot, dict):
+            return False
+        self._delegation_snapshot = dict(snapshot)
+        phase = snapshot.get("phase", "")
+        review = snapshot.get("review", {})
+        tests = snapshot.get("tests", {})
+        worker_labels = {
+            "working": "● العامل ينفّذ الآن",
+            "reviewing": "✓ اكتمل التنفيذ",
+            "testing": "✓ اكتمل التنفيذ",
+            "ready": "✓ اكتمل التنفيذ",
+            "blocked": "✓ انتهى التنفيذ",
+            "failed": "تعذر التنفيذ",
+            "accepted": "✓ اكتمل التنفيذ",
+        }
+        self.delegation_worker_var.set(worker_labels.get(phase, "بانتظار مهمة"))
+        review_status = review.get("status", "pending")
+        review_summary = safe_terminal_text(review.get("summary", "")).splitlines()
+        review_detail = review_summary[-1][:80] if review_summary else ""
+        if review_status == "passed":
+            self.delegation_review_var.set(f"✓ نجحت · {review_detail}".rstrip(" ·"))
+        elif review_status == "failed":
+            self.delegation_review_var.set(f"توقفت · {review_detail}".rstrip(" ·"))
+        elif phase == "reviewing":
+            self.delegation_review_var.set("● مراجعة مستقلة جارية")
+        else:
+            self.delegation_review_var.set("لم تبدأ المراجعة")
+        test_status = tests.get("status", "pending")
+        test_summary = safe_terminal_text(tests.get("summary", "")).splitlines()
+        test_detail = test_summary[-1][:80] if test_summary else ""
+        if test_status == "passed":
+            self.delegation_tests_var.set(f"✓ نجحت · {test_detail}".rstrip(" ·"))
+        elif test_status == "failed":
+            self.delegation_tests_var.set(f"فشلت · {test_detail}".rstrip(" ·"))
+        elif test_status == "skipped":
+            self.delegation_tests_var.set(f"لم تُشغّل · {test_detail}".rstrip(" ·"))
+        elif phase == "testing":
+            self.delegation_tests_var.set("● الفحوصات قيد التشغيل")
+        else:
+            self.delegation_tests_var.set("لم تبدأ الاختبارات")
+        if snapshot.get("accepted"):
+            self.delegation_accept_var.set("✓ اعتمدت النتيجة")
+        elif snapshot.get("can_accept"):
+            self.delegation_accept_var.set("جاهزة لقرارك")
+        elif phase in {"blocked", "failed"}:
+            self.delegation_accept_var.set("مقفلة بسبب بوابة الجودة")
+        else:
+            self.delegation_accept_var.set("الاعتماد مقفل")
+        self.accept_task_button.configure(
+            state="normal" if snapshot.get("can_accept") and not self.controller.busy else "disabled"
+        )
+        if snapshot.get("diff"):
+            self._set_diff_text(safe_terminal_text(snapshot["diff"]))
+        return True
+
+    def accept_delegated_task(self):
+        try:
+            snapshot = self.controller.accept_delegated_task()
+        except (RuntimeError, ValueError) as error:
+            self._set_status(safe_terminal_text(error), "danger")
+            return False
+        self._handle_delegation(snapshot)
+        self._set_status("اعتمدت نتيجة المهمة", "teal")
+        return True
 
     def undo_last(self):
         if self.controller.rollback():
@@ -1765,6 +1961,8 @@ class LocalAgentApp:
             self._stream_result = "success"
             self.connection_var.set("LM Studio: متصل")
             self._set_status("اكتمل الرد", "teal")
+        elif kind == "delegation":
+            self._handle_delegation(content)
         elif kind == "denied":
             self._record_stat("denied")
             self._finish_stream()
@@ -1919,13 +2117,14 @@ class LocalAgentApp:
             write_state = "الكتابة: معطلة"
         elif mode == "coding":
             color = self.colors["copper"]
-            note = "كل تعديل يعرض فرقًا ويطلب موافقة مستقلة."
+            note = "سياسة البرمجة نشطة؛ كل تعديل يعرض فرقًا ويطلب موافقة."
             badge = "الوضع: برمجة"
             write_state = "الكتابة: بموافقة"
         else:
             color = self.colors["danger"]
             note = (
-                "أوامر المضيف داخل حاوية معزولة عند اختيار Docker/Podman، وإلا فهي غير معزولة."
+                "سياسة البرمجة نشطة؛ أوامر المضيف معزولة مع Docker/Podman، "
+                "وإلا فهي غير معزولة."
             )
             badge = "الوضع: مضيف"
             write_state = "الأوامر: بموافقة"
@@ -1933,6 +2132,7 @@ class LocalAgentApp:
         self.trust_mode_var.set(badge)
         self.write_state_var.set(write_state)
         self.mode_note_var.set(note)
+        self.delegation_check.configure(state="disabled" if mode == "read" else "normal")
         self._active_config = None
 
     def _set_busy(self, busy):
@@ -1959,6 +2159,15 @@ class LocalAgentApp:
         self.open_folder_button.configure(state=normal)
         self.refresh_button.configure(state=normal)
         self.undo_button.configure(state=normal)
+        can_accept = bool(
+            self._delegation_snapshot and self._delegation_snapshot.get("can_accept")
+        )
+        self.accept_task_button.configure(
+            state="normal" if can_accept and not busy else "disabled"
+        )
+        self.delegation_check.configure(
+            state="disabled" if busy or self._selected_mode() == "read" else "normal"
+        )
         self.workspace_entry.configure(state=normal)
         self.session_entry.configure(state=normal)
         self.clear_session_button.configure(state=normal)

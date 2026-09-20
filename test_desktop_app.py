@@ -38,13 +38,18 @@ class AppSettingsTests(unittest.TestCase):
                 settings.save({
                     "dark_theme": True,
                     "workspace": "C:\\proj",
+                    "harness": "deepseek",
                     "evil": "drop",
                     "mode": 5,
                 })
             )
             self.assertEqual(
                 settings.load(),
-                {"dark_theme": True, "workspace": "C:\\proj"},
+                {
+                    "dark_theme": True,
+                    "workspace": "C:\\proj",
+                    "harness": "deepseek",
+                },
             )
             path.write_bytes(b"{not json")
             self.assertEqual(settings.load(), {})
@@ -121,12 +126,14 @@ class DesktopConfigTests(unittest.TestCase):
                 model=" local-model ",
                 base_url=" http://127.0.0.1:1234/v1 ",
                 mcp_config=f" {mcp_config} ",
+                harness="deepseek",
             )
 
             self.assertEqual(config.workspace, Path(temp_dir).resolve())
             self.assertEqual(config.mode, "coding")
             self.assertEqual(config.session, "demo")
             self.assertEqual(config.model, "local-model")
+            self.assertEqual(config.harness, "deepseek")
             self.assertEqual(config.mcp_config, mcp_config.resolve())
             self.assertFalse(config.semantic_memory)
             self.assertTrue(config.coding)
@@ -143,6 +150,8 @@ class DesktopConfigTests(unittest.TestCase):
                 DesktopConfig.parse("", "read")
             with self.assertRaises(ValueError):
                 DesktopConfig.parse(temp_dir, "read", model=" ")
+            with self.assertRaises(ValueError):
+                DesktopConfig.parse(temp_dir, "read", harness="unknown")
             with self.assertRaises(ValueError):
                 DesktopConfig.parse(Path(temp_dir) / "missing", "read")
             with self.assertRaises(ValueError):
@@ -173,7 +182,7 @@ class DesktopConfigTests(unittest.TestCase):
             skill_catalog = object()
             built = object()
             with (
-                patch.dict(os.environ, {"LM_STUDIO_API_KEY": "local-secret"}),
+                patch.dict(os.environ, {}, clear=True),
                 patch("desktop_core.LMStudioClient", return_value=client) as client_class,
                 patch("desktop_core.SemanticMemory") as memory_class,
                 patch("desktop_core.WorkspaceTools", return_value=workspace) as tools_class,
@@ -191,7 +200,11 @@ class DesktopConfigTests(unittest.TestCase):
                 result = build_local_agent(config, approver)
 
             self.assertIs(result, built)
-            client_class.assert_called_once_with(config.base_url, api_key="local-secret")
+            client_class.assert_called_once_with(
+                config.base_url,
+                api_key=None,
+                temperature=0.2,
+            )
             tools_class.assert_called_once_with(
                 config.workspace,
                 coding=True,
@@ -210,6 +223,7 @@ class DesktopConfigTests(unittest.TestCase):
                 skill_catalog=skill_catalog,
                 learner=ANY,
                 cognitive_memory=cognitive_memory,
+                harness="standard",
             )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -277,6 +291,7 @@ class DesktopConfigTests(unittest.TestCase):
                 skill_catalog=skill_catalog,
                 learner=ANY,
                 cognitive_memory=cognitive_memory,
+                harness="standard",
             )
 
     def test_missing_skills_pack_does_not_disable_the_agent(self):
@@ -497,6 +512,94 @@ class ApprovalBrokerTests(unittest.TestCase):
 
 
 class AgentControllerTests(unittest.TestCase):
+    def test_delegated_run_uses_independent_reviewer_and_test_gate(self):
+        created_modes = []
+
+        class Workspace:
+            root = Path(".")
+
+            @staticmethod
+            def review_changes():
+                return "--- a/app.py\n+++ b/app.py\n+print('safe')"
+
+            @staticmethod
+            def run_command(argv, cwd="."):
+                self.assertEqual(argv, ["python", "-m", "unittest"])
+                self.assertEqual(cwd, ".")
+                return {"exit_code": 0, "output": "6 tests OK", "truncated": False}
+
+        class WorkerAgent:
+            history = [{"role": "system", "content": "system"}]
+            workspace = Workspace()
+
+            @staticmethod
+            def answer_stream(_prompt, image_paths=()):
+                yield {"type": "token", "delta": "تم التنفيذ"}
+
+        class ReviewerAgent:
+            history = [{"role": "system", "content": "system"}]
+
+            @staticmethod
+            def answer(prompt):
+                self.assertIn("+++ b/app.py", prompt)
+                return "APPROVE\nالتغيير محدود وآمن"
+
+            @staticmethod
+            def close():
+                return None
+
+        def factory(config, _approver):
+            created_modes.append(config.mode)
+            return WorkerAgent() if config.mode == "host" else ReviewerAgent()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "test_sample.py").write_text("pass", encoding="utf-8")
+            controller = AgentController(agent_factory=factory)
+            controller.configure(DesktopConfig.parse(temp_dir, "host"))
+            self.assertTrue(controller.submit_delegated("أصلح المشروع"))
+            controller.worker.join(2)
+            events = controller.poll_events()
+
+        snapshots = [content for kind, content in events if kind == "delegation"]
+        self.assertTrue(snapshots)
+        self.assertEqual(snapshots[-1]["phase"], "ready")
+        self.assertEqual(snapshots[-1]["tests"]["status"], "passed")
+        accepted = controller.accept_delegated_task()
+        self.assertEqual(accepted["phase"], "accepted")
+        self.assertEqual(created_modes, ["host", "read"])
+
+    def test_delegated_run_blocks_when_host_commands_are_disabled(self):
+        class Workspace:
+            root = Path(".")
+
+            @staticmethod
+            def review_changes():
+                return "+change"
+
+        class Agent:
+            history = [{"role": "system", "content": "system"}]
+            workspace = Workspace()
+
+            @staticmethod
+            def answer(_prompt, *_args):
+                return "APPROVE\nسليم"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            controller = AgentController(agent_factory=lambda *_args: Agent())
+            controller.configure(DesktopConfig.parse(temp_dir, "coding"))
+            self.assertTrue(controller.submit_delegated("عدّل الملف"))
+            controller.worker.join(2)
+            snapshots = [
+                content
+                for kind, content in controller.poll_events()
+                if kind == "delegation"
+            ]
+
+        self.assertEqual(snapshots[-1]["phase"], "blocked")
+        self.assertEqual(snapshots[-1]["tests"]["status"], "skipped")
+        with self.assertRaises(RuntimeError):
+            controller.accept_delegated_task()
+
     def test_controller_forwards_stream_events_without_waiting_for_an_answer(self):
         class StreamingAgent:
             history = [{"role": "system", "content": "system"}]
@@ -719,6 +822,8 @@ class DesktopUiTests(unittest.TestCase):
             self.events = []
             self.closed = False
             self.rollbacks = 0
+            self.delegated_prompts = []
+            self.accepted_tasks = 0
 
         def configure(self, config):
             self.configs.append(config)
@@ -734,6 +839,25 @@ class DesktopUiTests(unittest.TestCase):
             self.busy = True
             self.prompts.append((prompt, tuple(image_paths)))
             return True
+
+        def submit_delegated(self, prompt, image_paths=()):
+            if self.busy:
+                return False
+            self.busy = True
+            self.delegated_prompts.append((prompt, tuple(image_paths)))
+            return True
+
+        def accept_delegated_task(self):
+            self.accepted_tasks += 1
+            return {
+                "phase": "accepted",
+                "review": {"status": "passed", "summary": "سليم"},
+                "tests": {"status": "passed", "summary": "10 passed"},
+                "diff": "+new",
+                "can_accept": False,
+                "accepted": True,
+                "error": "",
+            }
 
         def poll_events(self):
             events, self.events = self.events, []
@@ -818,7 +942,10 @@ class DesktopUiTests(unittest.TestCase):
             self.assertIn("أربع", app.status_var.get())
             app.prompt_text.insert("1.0", "حلل الصورة")
             self.assertTrue(app.send())
-            self.assertEqual(controller.prompts[-1], ("حلل الصورة", (str(image),)))
+            self.assertEqual(
+                controller.delegated_prompts[-1],
+                ("حلل الصورة", (str(image),)),
+            )
             self.assertEqual(app.pending_images, [])
             self.assertIn("صورة مرفقة: 1", app.transcript.get("1.0", "end"))
 
@@ -873,6 +1000,39 @@ class DesktopUiTests(unittest.TestCase):
             self.assertEqual(app.pending_images, [str(image)])
             app._handle_drop(Mock(data=temp_dir))
             self.assertEqual(app.workspace_var.get(), temp_dir)
+
+    def test_delegated_task_dashboard_tracks_gates_and_acceptance(self):
+        controller = self.FakeController()
+        app = LocalAgentApp(self.root, controller=controller)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app.workspace_var.set(temp_dir)
+            app.mode_var.set("برمجة + أوامر المضيف")
+            app.delegation_var.set(True)
+            app.prompt_text.insert("1.0", "أصلح الاختبارات")
+
+            self.assertTrue(app.send())
+            self.assertEqual(controller.delegated_prompts, [("أصلح الاختبارات", ())])
+
+            snapshot = {
+                "phase": "ready",
+                "review": {"status": "passed", "summary": "التغيير سليم"},
+                "tests": {"status": "passed", "summary": "10 passed"},
+                "diff": "--- a/app.py\n+++ b/app.py\n+new",
+                "can_accept": True,
+                "accepted": False,
+                "error": "",
+            }
+            controller.busy = False
+            app._handle_event("delegation", snapshot)
+
+            self.assertIn("نجحت", app.delegation_review_var.get())
+            self.assertIn("10 passed", app.delegation_tests_var.get())
+            self.assertEqual(app.accept_task_button.cget("state"), "normal")
+            self.assertIn("+++ b/app.py", app.changes_text.get("1.0", "end"))
+
+            app.accept_task_button.invoke()
+            self.assertEqual(controller.accepted_tasks, 1)
+            self.assertIn("اعتمدت", app.delegation_accept_var.get())
 
     def test_skills_panel_searches_and_previews_untrusted_instructions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1178,8 +1338,10 @@ class DesktopUiTests(unittest.TestCase):
             self.assertTrue(app._dark_theme)  # الداكن هو الافتراضي الآن
 
             app.workspace_var.set(str(workspace))
+            app.harness_var.set("DeepSeek")
             with patch.object(controller, "configure", return_value=[]):
                 self.assertTrue(app.apply_configuration())
+            self.assertEqual(app._active_config.harness, "deepseek")
             transcript = app.transcript.get("1.0", "end")
             self.assertIn("مساحة العمل جاهزة: 2 ملفًا", transcript)
             self.assertIn("Python (2)", transcript)
@@ -1190,6 +1352,7 @@ class DesktopUiTests(unittest.TestCase):
             saved = AppSettings(settings_path).load()
             self.assertEqual(saved["dark_theme"], toggled)
             self.assertEqual(saved["workspace"], str(workspace))
+            self.assertEqual(saved["harness"], "deepseek")
 
             second_root = tk.Tk()
             second_root.withdraw()
@@ -1201,6 +1364,7 @@ class DesktopUiTests(unittest.TestCase):
                 )
                 self.assertEqual(app2._dark_theme, toggled)
                 self.assertEqual(app2.workspace_var.get(), str(workspace))
+                self.assertEqual(app2.harness_var.get(), "DeepSeek")
             finally:
                 if second_root.winfo_exists():
                     second_root.destroy()

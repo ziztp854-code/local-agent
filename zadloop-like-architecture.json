@@ -1,0 +1,247 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "معمارية وكيل برمجي عربي محلي أولاً",
+    "output": "zadloop-like-architecture.html",
+    "quality_profile": "showcase",
+    "viewBox": [1380, 820],
+    "views": [
+      {
+        "id": "primary-run",
+        "label": "مسار تنفيذ المهمة",
+        "focus": ["developer", "desktop-ui", "orchestrator", "worker", "provider-adapter", "ai-provider"],
+        "note": "من وصف المهمة بالعربية إلى تنفيذ التغيير عبر مزوّد الذكاء الاصطناعي."
+      },
+      {
+        "id": "quality-gate",
+        "label": "بوابة الجودة",
+        "focus": ["orchestrator", "reviewer", "test-runner", "workspace", "desktop-ui"],
+        "note": "لا تُعرض النتيجة للاعتماد قبل المراجعة وتشغيل الفحوصات."
+      },
+      {
+        "id": "local-data",
+        "label": "البيانات المحلية",
+        "focus": ["desktop-ui", "local-state", "workspace", "policy-gate"],
+        "note": "الجلسات والإعدادات والملفات تبقى على الجهاز مع صلاحيات محدودة."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "developer",
+      "type": "external",
+      "label": "المطوّر",
+      "sublabel": "هدف مكتوب بالعربية",
+      "pos": [40, 310],
+      "size": [150, 72]
+    },
+    {
+      "id": "desktop-ui",
+      "type": "frontend",
+      "label": "تطبيق سطح المكتب",
+      "sublabel": "مشاريع، جلسات، Diff",
+      "pos": [250, 300],
+      "size": [180, 88],
+      "tag": "Tauri + React"
+    },
+    {
+      "id": "orchestrator",
+      "type": "backend",
+      "label": "منسّق الوكلاء",
+      "sublabel": "خطة وتشغيل وحالة المهمة",
+      "pos": [520, 300],
+      "size": [190, 88],
+      "tag": "State Machine"
+    },
+    {
+      "id": "worker",
+      "type": "backend",
+      "label": "عامل التنفيذ",
+      "sublabel": "قراءة وتعديل الملفات",
+      "pos": [800, 180],
+      "size": [170, 80]
+    },
+    {
+      "id": "reviewer",
+      "type": "backend",
+      "label": "المراجع المستقل",
+      "sublabel": "تحليل التغيير والمخاطر",
+      "pos": [800, 330],
+      "size": [170, 80]
+    },
+    {
+      "id": "test-runner",
+      "type": "backend",
+      "label": "مشغّل الفحوصات",
+      "sublabel": "Test · Lint · Typecheck",
+      "pos": [800, 480],
+      "size": [170, 80]
+    },
+    {
+      "id": "policy-gate",
+      "type": "security",
+      "label": "بوابة الصلاحيات",
+      "sublabel": "أوامر مسموحة وموافقات",
+      "pos": [520, 90],
+      "size": [190, 80],
+      "tag": "Fail Closed"
+    },
+    {
+      "id": "provider-adapter",
+      "type": "backend",
+      "label": "موحّد المزوّدات",
+      "sublabel": "واجهة Streaming موحّدة",
+      "pos": [1050, 180],
+      "size": [175, 80]
+    },
+    {
+      "id": "ai-provider",
+      "type": "external",
+      "label": "مزوّدو الذكاء الاصطناعي",
+      "sublabel": "Codex · OpenCode · غيرهما",
+      "pos": [1050, 40],
+      "size": [210, 80]
+    },
+    {
+      "id": "workspace",
+      "type": "database",
+      "label": "مساحة العمل وGit",
+      "sublabel": "ملفات، فرع، Diff",
+      "pos": [1050, 360],
+      "size": [175, 80],
+      "tag": "Local"
+    },
+    {
+      "id": "local-state",
+      "type": "database",
+      "label": "حالة محلية مشفّرة",
+      "sublabel": "جلسات وإعدادات وأسرار",
+      "pos": [250, 520],
+      "size": [180, 80],
+      "tag": "SQLite + Keychain"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "جهاز المستخدم — Local First",
+      "wraps": ["desktop-ui", "orchestrator", "worker", "reviewer", "test-runner", "policy-gate", "provider-adapter", "workspace", "local-state"],
+      "pad": 28
+    },
+    {
+      "kind": "security-group",
+      "label": "حد التنفيذ المقيّد",
+      "wraps": ["worker", "reviewer", "test-runner", "policy-gate", "workspace"],
+      "pad": 18
+    }
+  ],
+  "connections": [
+    {
+      "id": "submit-goal",
+      "from": "developer",
+      "to": "desktop-ui",
+      "label": "وصف المهمة",
+      "variant": "emphasis"
+    },
+    {
+      "id": "start-run",
+      "from": "desktop-ui",
+      "to": "orchestrator",
+      "label": "بدء جلسة",
+      "variant": "emphasis",
+      "labelDy": -22
+    },
+    {
+      "id": "authorize-tools",
+      "from": "orchestrator",
+      "to": "policy-gate",
+      "label": "طلب أداة",
+      "variant": "security"
+    },
+    {
+      "id": "delegate-work",
+      "from": "orchestrator",
+      "to": "worker",
+      "label": "تفويض التنفيذ",
+      "variant": "emphasis"
+    },
+    {
+      "id": "model-request",
+      "from": "worker",
+      "to": "provider-adapter",
+      "label": "طلب نموذج"
+    },
+    {
+      "id": "provider-stream",
+      "from": "provider-adapter",
+      "to": "ai-provider",
+      "label": "API / Streaming",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "edit-workspace",
+      "from": "worker",
+      "to": "workspace",
+      "label": "تعديل مقيّد"
+    },
+    {
+      "id": "independent-review",
+      "from": "orchestrator",
+      "to": "reviewer",
+      "label": "مراجعة مستقلة"
+    },
+    {
+      "id": "review-diff",
+      "from": "reviewer",
+      "to": "workspace",
+      "label": "قراءة Diff",
+      "labelAt": [960, 424]
+    },
+    {
+      "id": "run-checks",
+      "from": "orchestrator",
+      "to": "test-runner",
+      "label": "تشغيل الفحوصات"
+    },
+    {
+      "id": "test-files",
+      "from": "test-runner",
+      "to": "workspace",
+      "label": "Tests / Lint"
+    },
+    {
+      "id": "persist-session",
+      "from": "desktop-ui",
+      "to": "local-state",
+      "label": "حفظ محلي",
+      "labelDy": 24
+    },
+    {
+      "id": "present-result",
+      "from": "orchestrator",
+      "to": "desktop-ui",
+      "label": "Diff + نتائج",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "المبدأ الأساسي",
+      "items": ["التطبيق محلي أولاً", "المزوّد قابل للتبديل", "لا اعتماد من دون Diff واضح"]
+    },
+    {
+      "dot": "emerald",
+      "title": "بوابة الجودة",
+      "items": ["عامل ينفّذ", "مراجع مستقل يفحص", "الاختبارات تعمل قبل التسليم"]
+    },
+    {
+      "dot": "rose",
+      "title": "الأمان",
+      "items": ["صلاحيات أقل ما يمكن", "أوامر خطرة تحتاج موافقة", "الأسرار داخل Keychain"]
+    }
+  ]
+}

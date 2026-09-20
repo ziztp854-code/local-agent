@@ -14,10 +14,13 @@ from agent import (
     ApprovalDenied,
     LMStudioClient,
     LocalAgent,
+    ModelHarness,
     SessionStore,
     ToolError,
     WorkspaceTools,
+    load_programming_instructions,
     main,
+    resolve_model_harness,
     safe_terminal_text,
 )
 from mcp_client import MCPApprovalDenied
@@ -1176,6 +1179,81 @@ class LocalAgentTests(unittest.TestCase):
         self.assertEqual(answer, "توقفت")
         self.assertEqual(workspace.calls, 1)
         self.assertIn("كرّرت استدعاء الأداة نفسه", client.second_tool_error)
+
+
+class ModelHarnessTests(unittest.TestCase):
+    def test_deepseek_harness_configures_generation_and_system_prompt(self):
+        harness = resolve_model_harness("deepseek")
+
+        self.assertIsInstance(harness, ModelHarness)
+        self.assertEqual(harness.name, "deepseek")
+        self.assertEqual(harness.temperature, 0.1)
+        self.assertIn("استدعاءات الأدوات", harness.system_suffix)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            agent = LocalAgent(
+                object(),
+                WorkspaceTools(temp_dir),
+                harness="deepseek",
+            )
+        self.assertEqual(agent.harness.name, "deepseek")
+        self.assertIn("تهيئة DeepSeek", agent.history[0]["content"])
+
+    def test_harness_rejects_unknown_names_and_client_uses_temperature(self):
+        with self.assertRaisesRegex(ValueError, "Harness"):
+            resolve_model_harness("unknown")
+
+        client = LMStudioClient(temperature=0.1)
+        with patch.object(
+            client,
+            "_post",
+            return_value={"choices": [{"message": {"content": "ok"}}]},
+        ) as post:
+            client.chat([], [], "deepseek")
+        self.assertEqual(post.call_args.args[1]["temperature"], 0.1)
+
+        for value in (-0.1, 2.1, True, float("nan")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                LMStudioClient(temperature=value)
+
+
+class ProgrammingInstructionsTests(unittest.TestCase):
+    def test_programming_policy_loads_and_only_applies_to_coding_mode(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            policy_path = Path(temp_dir, "AGENTS_PROGRAMMING_ONLY.md")
+            policy_path.write_text("# Policy\n\nقاعدة برمجية مخصصة", encoding="utf-8")
+            policy = load_programming_instructions(policy_path)
+
+            coding_agent = LocalAgent(
+                object(),
+                WorkspaceTools(temp_dir, coding=True, approver=lambda *_args: False),
+                programming_instructions=policy,
+            )
+            read_agent = LocalAgent(
+                object(),
+                WorkspaceTools(temp_dir),
+                programming_instructions=policy,
+            )
+
+        self.assertIn("قاعدة برمجية مخصصة", coding_agent.history[0]["content"])
+        self.assertIn("سياسة البرمجة المحلية", coding_agent.history[0]["content"])
+        self.assertNotIn("قاعدة برمجية مخصصة", read_agent.history[0]["content"])
+
+    def test_programming_policy_rejects_missing_oversized_and_invalid_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with self.assertRaises(RuntimeError):
+                load_programming_instructions(root / "missing.md")
+
+            oversized = root / "oversized.md"
+            oversized.write_bytes(b"x" * 64_001)
+            with self.assertRaises(ValueError):
+                load_programming_instructions(oversized)
+
+            invalid = root / "invalid.md"
+            invalid.write_bytes(b"\xff")
+            with self.assertRaises(ValueError):
+                load_programming_instructions(invalid)
 
 
 class LMStudioClientTests(unittest.TestCase):
